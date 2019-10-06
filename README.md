@@ -32,7 +32,7 @@ traverse stack traces when JVM is running `System.arraycopy()`.
 
 This test starts two similar clients. The code of the clients
 is the same, except that `BusyClient` constantly receives new data,
-while `IdleClient` does almst nothing but waiting for incoming data.
+while `IdleClient` does almost nothing but waiting for incoming data.
 
 Most sampling profilers will not make difference between
 `BusyClient` and `IdleClient`, because JVM does not know whether
