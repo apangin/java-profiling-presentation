@@ -1,6 +1,6 @@
 # Presentation materials
 
-## Mastering Java Performance with async-profiler
+## Improving Performance with async-profiler
 
 The profiler is your best friend in finding performance bottlenecks.
 Although there are a lot of profilers available, even popular tools can be misleading.
@@ -12,7 +12,7 @@ subtle performance issues and native memory leaks in a Java application.
 
 ## Slides
 
-[mastering-java-profiling.pdf](presentation/mastering-java-profiling.pdf)
+[java-profiling.pdf](presentation/java-profiling.pdf)
 
 ## Code samples
 
