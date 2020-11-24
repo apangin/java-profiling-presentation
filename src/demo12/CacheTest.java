@@ -6,11 +6,11 @@ import java.util.stream.LongStream;
 
 /**
  * This example makes use of JFR compatible output.
- * Run with `-f out.jfr`
+ * Run with `-f profile.jfr`
  *
  * The program generates a continuous load with
  * the peaks of CPU usage every 5 seconds.
- * The analysis of JFR output in Java Mission Control
+ * The analysis of JFR output in JDK Mission Control
  * shows the cause of the peaks.
  */
 public class CacheTest {

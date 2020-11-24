@@ -14,7 +14,7 @@ import java.util.concurrent.ThreadLocalRandom;
  * a native method consumes CPU or just waits inside a blocking call.
  */
 public class SocketTest {
-    public static final String HOST = "192.168.226.129";
+    public static final String HOST = "192.168.226.189";
     public static final int PORT = 1234;
 
     public static void main(String[] args) throws Exception {

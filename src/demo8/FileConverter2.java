@@ -22,7 +22,7 @@ import java.util.stream.Collectors;
  * Basic usage:
  *   AsyncProfiler.getInstance()
  *   start() / stop()
- *   dumpTraces()
+ *   dumpFlat()
  *   execute()
  */
 public class FileConverter2 {
@@ -40,9 +40,10 @@ public class FileConverter2 {
             converter.convertFile(PATH + "/" + fileName);
         }
 
-        // String profile = AsyncProfiler.getInstance().dumpTraces(100);
+        String profile = AsyncProfiler.getInstance().dumpFlat(100);
+        System.out.println(profile);
 
-        AsyncProfiler.getInstance().execute("stop,file=profile.svg");
+        AsyncProfiler.getInstance().execute("stop,file=profile2.html");
     }
 
     public void convertFile(String fileName) throws IOException {

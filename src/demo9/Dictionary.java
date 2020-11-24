@@ -16,7 +16,7 @@ public class Dictionary {
     private static void testRandomRead(long[] array, int bound) {
         long startTime = System.nanoTime();
 
-        for (long i = 0; i < 2000000000; i++) {
+        for (long i = 0; i < 1000000000; i++) {
             int index = ThreadLocalRandom.current().nextInt(bound);
             array[index]++;
         }

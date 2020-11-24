@@ -36,7 +36,7 @@ public class FileConverter3 {
             converter.convertFile(PATH + "/" + fileName);
         }
 
-        AsyncProfiler.getInstance().execute("stop,file=profile.svg");
+        AsyncProfiler.getInstance().execute("stop,file=profile3.html");
     }
 
     public void convertFile(String fileName) throws IOException {

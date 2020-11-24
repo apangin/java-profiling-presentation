@@ -1,0 +1,803 @@
+<!DOCTYPE html>
+<html lang='en'>
+<head>
+<meta charset='utf-8'>
+<style>
+	body {margin: 0; padding: 10px; background-color: #ffffff}
+	h1 {margin: 5px 0 0 0; font-size: 18px; font-weight: normal; text-align: center}
+	header {margin: -24px 0 5px 0; line-height: 24px}
+	button {font: 12px sans-serif; cursor: pointer}
+	p {margin: 5px 0 5px 0}
+	a {color: #0366d6}
+	#hl {position: absolute; display: none; overflow: hidden; white-space: nowrap; pointer-events: none; background-color: #ffffe0; outline: 1px solid #ffc000; height: 15px}
+	#hl span {padding: 0 3px 0 3px}
+	#status {overflow: hidden; white-space: nowrap}
+	#match {overflow: hidden; white-space: nowrap; display: none; float: right; text-align: right}
+	#reset {cursor: pointer}
+</style>
+</head>
+<body style='font: 12px Verdana, sans-serif'>
+<h1>Flame Graph</h1>
+<header style='text-align: left'><button id='reverse' title='Reverse'>&#x1f53b;</button>&nbsp;&nbsp;<button id='search' title='Search'>&#x1f50d;</button></header>
+<header style='text-align: right'>Produced by <a href='https://github.com/jvm-profiling-tools/async-profiler'>async-profiler</a></header>
+<canvas id='canvas' style='width: 100%; height: 800px'></canvas>
+<div id='hl'><span></span></div>
+<p id='match'>Matched: <span id='matchval'></span> <span id='reset' title='Clear'>&#x274c;</span></p>
+<p id='status'>&nbsp;</p>
+<script>
+	// Copyright 2020 Andrei Pangin
+	// Licensed under the Apache License, Version 2.0.
+	'use strict';
+	var root, rootLevel, px, pattern;
+	var reverse = false;
+	const levels = Array(50);
+	for (let h = 0; h < levels.length; h++) {
+		levels[h] = [];
+	}
+
+	const canvas = document.getElementById('canvas');
+	const c = canvas.getContext('2d');
+	const hl = document.getElementById('hl');
+	const status = document.getElementById('status');
+
+	const canvasWidth = canvas.offsetWidth;
+	const canvasHeight = canvas.offsetHeight;
+	canvas.style.width = canvasWidth + 'px';
+	canvas.width = canvasWidth * (devicePixelRatio || 1);
+	canvas.height = canvasHeight * (devicePixelRatio || 1);
+	if (devicePixelRatio) c.scale(devicePixelRatio, devicePixelRatio);
+	c.font = document.body.style.font;
+
+	const palette = [
+		[0x50e150, 30, 30, 30],
+		[0x50bebe, 30, 30, 30],
+		[0xe17d00, 30, 30,  0],
+		[0xc8c83c, 30, 30, 10],
+		[0xe15a5a, 30, 40, 40],
+	];
+
+	function getColor(p) {
+		const v = Math.random();
+		return '#' + (p[0] + ((p[1] * v) << 16 | (p[2] * v) << 8 | (p[3] * v))).toString(16);
+	}
+
+	function f(level, left, width, type, title) {
+		levels[level].push({left: left, width: width, color: getColor(palette[type]), title: title});
+	}
+
+	function samples(n) {
+		return n === 1 ? '1 sample' : n.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ',') + ' samples';
+	}
+
+	function pct(a, b) {
+		return a >= b ? '100' : (100 * a / b).toFixed(2);
+	}
+
+	function findFrame(frames, x) {
+		let left = 0;
+		let right = frames.length - 1;
+
+		while (left <= right) {
+			const mid = (left + right) >>> 1;
+			const f = frames[mid];
+
+			if (f.left > x) {
+				right = mid - 1;
+			} else if (f.left + f.width <= x) {
+				left = mid + 1;
+			} else {
+				return f;
+			}
+		}
+
+		if (frames[left] && (frames[left].left - x) * px < 0.5) return frames[left];
+		if (frames[right] && (x - (frames[right].left + frames[right].width)) * px < 0.5) return frames[right];
+
+		return null;
+	}
+
+	function search(r) {
+		if (r && (r = prompt('Enter regexp to search:', '')) === null) {
+			return;
+		}
+
+		pattern = r ? RegExp(r) : undefined;
+		const matched = render(root, rootLevel);
+		document.getElementById('matchval').textContent = pct(matched, root.width) + '%';
+		document.getElementById('match').style.display = r ? 'inherit' : 'none';
+	}
+
+	function render(newRoot, newLevel) {
+		if (root) {
+			c.fillStyle = '#ffffff';
+			c.fillRect(0, 0, canvasWidth, canvasHeight);
+		}
+
+		root = newRoot || levels[0][0];
+		rootLevel = newLevel || 0;
+		px = canvasWidth / root.width;
+
+		const x0 = root.left;
+		const x1 = x0 + root.width;
+		const marked = [];
+
+		function mark(f) {
+			return marked[f.left] >= f.width || (marked[f.left] = f.width);
+		}
+
+		function totalMarked() {
+			let total = 0;
+			let left = 0;
+			for (let x in marked) {
+				if (+x >= left) {
+					total += marked[x];
+					left = +x + marked[x];
+				}
+			}
+			return total;
+		}
+
+		function drawFrame(f, y, alpha) {
+			if (f.left < x1 && f.left + f.width > x0) {
+				c.fillStyle = pattern && f.title.match(pattern) && mark(f) ? '#ee00ee' : f.color;
+				c.fillRect((f.left - x0) * px, y, f.width * px, 15);
+
+				if (f.width * px >= 21) {
+					const chars = Math.floor(f.width * px / 7);
+					const title = f.title.length <= chars ? f.title : f.title.substring(0, chars - 2) + '..';
+					c.fillStyle = '#000000';
+					c.fillText(title, Math.max(f.left - x0, 0) * px + 3, y + 12, f.width * px - 6);
+				}
+
+				if (alpha) {
+					c.fillStyle = 'rgba(255, 255, 255, 0.5)';
+					c.fillRect((f.left - x0) * px, y, f.width * px, 15);
+				}
+			}
+		}
+
+		for (let h = 0; h < levels.length; h++) {
+			const y = reverse ? h * 16 : canvasHeight - (h + 1) * 16;
+			const frames = levels[h];
+			for (let i = 0; i < frames.length; i++) {
+				drawFrame(frames[i], y, h < rootLevel);
+			}
+		}
+
+		return totalMarked();
+	}
+
+	canvas.onmousemove = function() {
+		const h = Math.floor((reverse ? event.offsetY : (canvasHeight - event.offsetY)) / 16);
+		if (h >= 0 && h < levels.length) {
+			const f = findFrame(levels[h], event.offsetX / px + root.left);
+			if (f) {
+				hl.style.left = (Math.max(f.left - root.left, 0) * px + canvas.offsetLeft) + 'px';
+				hl.style.width = (Math.min(f.width, root.width) * px) + 'px';
+				hl.style.top = ((reverse ? h * 16 : canvasHeight - (h + 1) * 16) + canvas.offsetTop) + 'px';
+				hl.firstChild.textContent = f.title;
+				hl.style.display = 'block';
+				canvas.title = f.title + '\n(' + samples(f.width) + ', ' + pct(f.width, levels[0][0].width) + '%)';
+				canvas.style.cursor = 'pointer';
+				canvas.onclick = function() {
+					if (f != root) {
+						render(f, h);
+						canvas.onmousemove();
+					}
+				};
+				status.textContent = 'Function: ' + canvas.title;
+				return;
+			}
+		}
+		canvas.onmouseout();
+	}
+
+	canvas.onmouseout = function() {
+		hl.style.display = 'none';
+		status.textContent = '\xa0';
+		canvas.title = '';
+		canvas.style.cursor = '';
+		canvas.onclick = '';
+	}
+
+	document.getElementById('reverse').onclick = function() {
+		reverse = !reverse;
+		render();
+	}
+
+	document.getElementById('search').onclick = function() {
+		search(true);
+	}
+
+	document.getElementById('reset').onclick = function() {
+		search(false);
+	}
+
+	window.onkeydown = function() {
+		if (event.ctrlKey && event.keyCode === 70) {
+			event.preventDefault();
+			search(true);
+		} else if (event.keyCode === 27) {
+			search(false);
+		}
+	}
+f(0,0,7413,4,'all')
+f(1,0,18,4,'[deoptimization]')
+f(2,0,18,3,'Deoptimization::fetch_unroll_info_helper(JavaThread*)')
+f(3,0,2,3,'CHeapObj<(MemoryType)6>::operator new(unsigned long)')
+f(4,0,2,3,'CHeapObj<(MemoryType)6>::operator new(unsigned long, NativeCallStack const&)')
+f(5,0,2,4,'__libc_malloc')
+f(3,2,2,3,'CHeapObj<(MemoryType)7>::operator new(unsigned long)')
+f(4,2,2,3,'CHeapObj<(MemoryType)7>::operator new(unsigned long, NativeCallStack const&)')
+f(5,2,2,4,'__libc_malloc')
+f(3,4,2,3,'Deoptimization::UnrollBlock::UnrollBlock(int, int, int, int, long*, unsigned char**, BasicType)')
+f(4,4,2,4,'__libc_malloc')
+f(3,6,4,4,'__libc_malloc')
+f(3,10,8,3,'vframeArray::allocate(JavaThread*, int, GrowableArray<compiledVFrame*>*, RegisterMap*, frame, frame, frame, bool)')
+f(4,10,2,4,'__libc_malloc')
+f(4,12,6,3,'vframeArrayElement::fill_in(compiledVFrame*, bool)')
+f(5,12,3,3,'CHeapObj<(MemoryType)7>::operator new(unsigned long)')
+f(6,12,3,3,'CHeapObj<(MemoryType)7>::operator new(unsigned long, NativeCallStack const&)')
+f(7,12,3,4,'__libc_malloc')
+f(5,15,3,3,'MonitorChunk::MonitorChunk(int)')
+f(6,15,3,4,'__libc_malloc')
+f(1,18,4,4,'[unknown]')
+f(2,18,1,4,'[unknown]')
+f(3,18,1,4,'[unknown]')
+f(4,18,1,4,'__libc_malloc')
+f(2,19,3,4,'__libc_malloc')
+f(1,22,7151,0,'demo10/GetImage.main')
+f(2,22,7151,0,'demo10/GetImage.getImage')
+f(3,22,2384,0,'demo10/GetImage.copyStream')
+f(4,22,2384,0,'java/io/FilterInputStream.read')
+f(5,22,2384,0,'java/io/FilterInputStream.read')
+f(6,22,2384,0,'java/util/zip/InflaterInputStream.read')
+f(7,22,2384,0,'java/util/zip/Inflater.inflate')
+f(8,22,2384,0,'java/util/zip/Inflater.inflateBytes')
+f(9,22,2384,4,'Java_java_util_zip_Inflater_inflateBytes')
+f(10,22,2384,4,'inflate')
+f(11,22,2384,4,'__libc_malloc')
+f(3,2406,4767,0,'java/lang/Class.getResourceAsStream')
+f(4,2406,4767,0,'java/net/URLClassLoader.getResourceAsStream')
+f(5,2406,2384,0,'java/lang/ClassLoader.getResource')
+f(6,2406,2384,0,'java/net/URLClassLoader.findResource')
+f(7,2406,2384,0,'java/security/AccessController.doPrivileged')
+f(8,2406,2384,0,'java/net/URLClassLoader$2.run')
+f(9,2406,2384,0,'java/net/URLClassLoader$2.run')
+f(10,2406,2384,0,'sun/misc/URLClassPath.findResource')
+f(11,2406,2384,0,'sun/misc/URLClassPath$FileLoader.findResource')
+f(12,2406,2384,0,'sun/misc/URLClassPath$FileLoader.getResource')
+f(13,2406,2384,0,'java/io/File.exists')
+f(14,2406,2384,0,'java/io/UnixFileSystem.getBooleanAttributes')
+f(15,2406,2384,0,'java/io/UnixFileSystem.getBooleanAttributes0')
+f(16,2406,2384,4,'Java_java_io_UnixFileSystem_getBooleanAttributes0')
+f(17,2406,2384,4,'__libc_malloc')
+f(5,4790,2383,0,'sun/net/www/protocol/jar/JarURLConnection.getInputStream')
+f(6,4790,2383,0,'java/util/jar/JarFile.getInputStream')
+f(7,4790,2383,0,'java/util/zip/ZipFile.getInputStream')
+f(8,4790,2383,0,'java/util/zip/ZipFile.getInflater')
+f(9,4790,2383,0,'java/util/zip/Inflater.<init>')
+f(10,4790,2383,0,'java/util/zip/Inflater.init')
+f(11,4790,2383,4,'Java_java_util_zip_Inflater_init')
+f(12,4790,2383,4,'__libc_malloc')
+f(1,7173,240,4,'start_thread')
+f(2,7173,240,4,'java_start(Thread*)')
+f(3,7173,2,3,'GCTaskThread::run()')
+f(4,7173,2,3,'ThreadRootsTask::do_it(GCTaskManager*, unsigned int)')
+f(5,7173,2,3,'JavaThread::oops_do(OopClosure*, CLDClosure*, CodeBlobClosure*)')
+f(6,7173,2,3,'frame::oops_do_internal(OopClosure*, CLDClosure*, CodeBlobClosure*, RegisterMap*, bool)')
+f(7,7173,2,3,'OopMapSet::oops_do(frame const*, RegisterMap const*, OopClosure*)')
+f(8,7173,2,3,'CHeapObj<(MemoryType)6>::operator new(unsigned long)')
+f(9,7173,2,3,'CHeapObj<(MemoryType)6>::operator new(unsigned long, NativeCallStack const&)')
+f(10,7173,2,4,'__libc_malloc')
+f(3,7175,238,3,'JavaThread::run()')
+f(4,7175,238,3,'JavaThread::thread_main_inner()')
+f(5,7175,207,3,'CompileBroker::compiler_thread_loop()')
+f(6,7175,207,3,'CompileBroker::invoke_compiler_on_method(CompileTask*)')
+f(7,7175,199,3,'C2Compiler::compile_method(ciEnv*, ciMethod*, int)')
+f(8,7175,199,3,'Compile::Compile(ciEnv*, C2Compiler*, ciMethod*, int, bool, bool, bool)')
+f(9,7175,5,3,'Arena::Arena(MemoryType)')
+f(10,7175,5,3,'ChunkPool::allocate(unsigned long, AllocFailStrategy::AllocFailEnum)')
+f(11,7175,5,4,'__libc_malloc')
+f(9,7180,57,3,'Compile::Code_Gen()')
+f(10,7180,6,3,'Compile::Output()')
+f(11,7180,6,3,'Compile::init_buffer(unsigned int*)')
+f(12,7180,6,3,'Compile::shorten_branches(unsigned int*, int&, int&, int&)')
+f(13,7180,6,3,'Compile::scratch_emit_size(Node const*)')
+f(14,7180,5,3,'cmpFastUnlockNode::emit(CodeBuffer&, PhaseRegAlloc*) const')
+f(15,7180,5,3,'MacroAssembler::fast_unlock(RegisterImpl*, RegisterImpl*, RegisterImpl*, bool)')
+f(16,7180,5,3,'Assembler::jmpb(Label&)')
+f(17,7180,5,3,'Label::add_patch_at(CodeBuffer*, int)')
+f(18,7180,5,3,'CodeBuffer::create_patch_overflow()')
+f(19,7180,5,3,'Arena::operator new(unsigned long, MemoryType)')
+f(20,7180,5,4,'__libc_malloc')
+f(14,7185,1,3,'string_equalsNode::emit(CodeBuffer&, PhaseRegAlloc*) const')
+f(15,7185,1,3,'MacroAssembler::char_arrays_equals(bool, RegisterImpl*, RegisterImpl*, RegisterImpl*, RegisterImpl*, RegisterImpl*, XMMRegisterImpl*, XMMRegisterImpl*)')
+f(16,7185,1,3,'Assembler::jccb(Assembler::Condition, Label&)')
+f(17,7185,1,3,'Label::add_patch_at(CodeBuffer*, int)')
+f(18,7185,1,3,'CodeBuffer::create_patch_overflow()')
+f(19,7185,1,3,'Arena::operator new(unsigned long, MemoryType)')
+f(20,7185,1,4,'__libc_malloc')
+f(10,7186,4,3,'Compile::fill_buffer(CodeBuffer*, unsigned int*)')
+f(11,7186,2,3,'cmpFastUnlockNode::emit(CodeBuffer&, PhaseRegAlloc*) const')
+f(12,7186,2,3,'MacroAssembler::fast_unlock(RegisterImpl*, RegisterImpl*, RegisterImpl*, bool)')
+f(13,7186,2,3,'Assembler::jmpb(Label&)')
+f(14,7186,2,3,'Label::add_patch_at(CodeBuffer*, int)')
+f(15,7186,2,3,'CodeBuffer::create_patch_overflow()')
+f(16,7186,2,3,'Arena::operator new(unsigned long, MemoryType)')
+f(17,7186,2,4,'__libc_malloc')
+f(11,7188,1,3,'jmpDir_shortNode::emit(CodeBuffer&, PhaseRegAlloc*) const')
+f(12,7188,1,3,'Assembler::jmpb(Label&)')
+f(13,7188,1,3,'Label::add_patch_at(CodeBuffer*, int)')
+f(14,7188,1,3,'CodeBuffer::create_patch_overflow()')
+f(15,7188,1,3,'Arena::operator new(unsigned long, MemoryType)')
+f(16,7188,1,4,'__libc_malloc')
+f(11,7189,1,3,'string_equalsNode::emit(CodeBuffer&, PhaseRegAlloc*) const')
+f(12,7189,1,3,'MacroAssembler::char_arrays_equals(bool, RegisterImpl*, RegisterImpl*, RegisterImpl*, RegisterImpl*, RegisterImpl*, XMMRegisterImpl*, XMMRegisterImpl*)')
+f(13,7189,1,3,'Assembler::jccb(Assembler::Condition, Label&)')
+f(14,7189,1,3,'Label::add_patch_at(CodeBuffer*, int)')
+f(15,7189,1,3,'CodeBuffer::create_patch_overflow()')
+f(16,7189,1,3,'Arena::operator new(unsigned long, MemoryType)')
+f(17,7189,1,4,'__libc_malloc')
+f(10,7190,2,3,'Matcher::Matcher()')
+f(11,7190,2,3,'PhaseTransform::PhaseTransform(Phase::PhaseNumber)')
+f(12,7190,2,3,'Type_Array::grow(unsigned int)')
+f(13,7190,2,3,'Arena::Arealloc(void*, unsigned long, unsigned long, AllocFailStrategy::AllocFailEnum)')
+f(14,7190,2,3,'Arena::grow(unsigned long, AllocFailStrategy::AllocFailEnum)')
+f(15,7190,2,4,'__libc_malloc')
+f(10,7192,11,3,'Matcher::match()')
+f(11,7192,9,3,'Matcher::xform(Node*, int)')
+f(12,7192,4,3,'Arena::grow(unsigned long, AllocFailStrategy::AllocFailEnum)')
+f(13,7192,4,4,'__libc_malloc')
+f(12,7196,5,3,'Matcher::match_tree(Node const*)')
+f(13,7196,3,3,'Matcher::Label_Root(Node const*, State*, Node*, Node const*)')
+f(14,7196,3,3,'Matcher::Label_Root(Node const*, State*, Node*, Node const*)')
+f(15,7196,2,3,'Arena::grow(unsigned long, AllocFailStrategy::AllocFailEnum)')
+f(16,7196,2,3,'ChunkPool::allocate(unsigned long, AllocFailStrategy::AllocFailEnum)')
+f(17,7196,2,4,'__libc_malloc')
+f(15,7198,1,3,'Matcher::Label_Root(Node const*, State*, Node*, Node const*)')
+f(16,7198,1,3,'Arena::grow(unsigned long, AllocFailStrategy::AllocFailEnum)')
+f(17,7198,1,3,'ChunkPool::allocate(unsigned long, AllocFailStrategy::AllocFailEnum)')
+f(18,7198,1,4,'__libc_malloc')
+f(13,7199,2,3,'Matcher::ReduceInst(State*, int, Node*&)')
+f(14,7199,2,3,'Node_Array::grow(unsigned int)')
+f(15,7199,2,3,'Arena::Arealloc(void*, unsigned long, unsigned long, AllocFailStrategy::AllocFailEnum)')
+f(16,7199,2,3,'Arena::grow(unsigned long, AllocFailStrategy::AllocFailEnum)')
+f(17,7199,2,4,'__libc_malloc')
+f(11,7201,2,3,'Node_Array::grow(unsigned int)')
+f(12,7201,2,3,'Arena::Arealloc(void*, unsigned long, unsigned long, AllocFailStrategy::AllocFailEnum)')
+f(13,7201,2,3,'Arena::grow(unsigned long, AllocFailStrategy::AllocFailEnum)')
+f(14,7201,2,4,'__libc_malloc')
+f(10,7203,1,3,'PhaseBlockLayout::PhaseBlockLayout(PhaseCFG&)')
+f(11,7203,1,3,'PhaseBlockLayout::grow_traces()')
+f(12,7203,1,4,'__libc_malloc')
+f(10,7204,33,3,'PhaseChaitin::Register_Allocate()')
+f(11,7204,25,3,'PhaseIFG::init(unsigned int)')
+f(12,7204,25,3,'Arena::grow(unsigned long, AllocFailStrategy::AllocFailEnum)')
+f(13,7204,25,4,'__libc_malloc')
+f(11,7229,8,3,'PhaseLive::compute(unsigned int)')
+f(12,7229,8,3,'Arena::grow(unsigned long, AllocFailStrategy::AllocFailEnum)')
+f(13,7229,8,4,'__libc_malloc')
+f(9,7237,2,3,'Compile::Init(int)')
+f(10,7237,1,3,'DebugInformationRecorder::DebugInformationRecorder(OopRecorder*)')
+f(11,7237,1,3,'Arena::grow(unsigned long, AllocFailStrategy::AllocFailEnum)')
+f(12,7237,1,3,'ChunkPool::allocate(unsigned long, AllocFailStrategy::AllocFailEnum)')
+f(13,7237,1,4,'__libc_malloc')
+f(10,7238,1,3,'GenericGrowableArray::raw_allocate(int)')
+f(11,7238,1,3,'Arena::grow(unsigned long, AllocFailStrategy::AllocFailEnum)')
+f(12,7238,1,3,'ChunkPool::allocate(unsigned long, AllocFailStrategy::AllocFailEnum)')
+f(13,7238,1,4,'__libc_malloc')
+f(9,7239,82,3,'Compile::Optimize()')
+f(10,7239,1,3,'Compile::remove_speculative_types(PhaseIterGVN&) [clone .part.222]')
+f(11,7239,1,3,'Node_Array::grow(unsigned int)')
+f(12,7239,1,3,'Arena::Arealloc(void*, unsigned long, unsigned long, AllocFailStrategy::AllocFailEnum)')
+f(13,7239,1,3,'Arena::grow(unsigned long, AllocFailStrategy::AllocFailEnum)')
+f(14,7239,1,3,'ChunkPool::allocate(unsigned long, AllocFailStrategy::AllocFailEnum)')
+f(15,7239,1,4,'__libc_malloc')
+f(10,7240,1,3,'PhaseCCP::do_transform()')
+f(11,7240,1,3,'PhaseCCP::transform(Node*)')
+f(12,7240,1,3,'Node_Array::grow(unsigned int)')
+f(13,7240,1,3,'Arena::Arealloc(void*, unsigned long, unsigned long, AllocFailStrategy::AllocFailEnum)')
+f(14,7240,1,3,'Arena::grow(unsigned long, AllocFailStrategy::AllocFailEnum)')
+f(15,7240,1,4,'__libc_malloc')
+f(10,7241,6,3,'PhaseIdealLoop::PhaseIdealLoop(PhaseIterGVN&, bool, bool)')
+f(11,7241,6,3,'PhaseTransform::PhaseTransform(Phase::PhaseNumber)')
+f(12,7241,6,3,'Type_Array::grow(unsigned int)')
+f(13,7241,6,3,'Arena::Arealloc(void*, unsigned long, unsigned long, AllocFailStrategy::AllocFailEnum)')
+f(14,7241,6,3,'Arena::grow(unsigned long, AllocFailStrategy::AllocFailEnum)')
+f(15,7241,1,3,'ChunkPool::allocate(unsigned long, AllocFailStrategy::AllocFailEnum)')
+f(16,7241,1,4,'__libc_malloc')
+f(15,7242,5,4,'__libc_malloc')
+f(10,7247,72,3,'PhaseIdealLoop::build_and_optimize(bool, bool)')
+f(11,7247,6,3,'IdealLoopTree::iteration_split(PhaseIdealLoop*, Node_List&)')
+f(12,7247,6,3,'IdealLoopTree::iteration_split_impl(PhaseIdealLoop*, Node_List&)')
+f(13,7247,3,3,'PhaseIdealLoop::do_unroll(IdealLoopTree*, Node_List&, bool)')
+f(14,7247,3,3,'PhaseIdealLoop::clone_loop(IdealLoopTree*, Node_List&, int, Node*)')
+f(15,7247,2,3,'Node_Array::grow(unsigned int)')
+f(16,7247,2,3,'Arena::Arealloc(void*, unsigned long, unsigned long, AllocFailStrategy::AllocFailEnum)')
+f(17,7247,2,3,'Arena::grow(unsigned long, AllocFailStrategy::AllocFailEnum)')
+f(18,7247,1,3,'ChunkPool::allocate(unsigned long, AllocFailStrategy::AllocFailEnum)')
+f(19,7247,1,4,'__libc_malloc')
+f(18,7248,1,4,'__libc_malloc')
+f(15,7249,1,3,'PhaseIdealLoop::set_idom(Node*, Node*, unsigned int)')
+f(16,7249,1,3,'Arena::Arealloc(void*, unsigned long, unsigned long, AllocFailStrategy::AllocFailEnum)')
+f(17,7249,1,3,'Arena::grow(unsigned long, AllocFailStrategy::AllocFailEnum)')
+f(18,7249,1,4,'__libc_malloc')
+f(13,7250,3,3,'PhaseIdealLoop::insert_pre_post_loops(IdealLoopTree*, Node_List&, bool)')
+f(14,7250,3,3,'PhaseIdealLoop::clone_loop(IdealLoopTree*, Node_List&, int, Node*)')
+f(15,7250,2,3,'Node_Array::grow(unsigned int)')
+f(16,7250,2,3,'Arena::Arealloc(void*, unsigned long, unsigned long, AllocFailStrategy::AllocFailEnum)')
+f(17,7250,2,3,'Arena::grow(unsigned long, AllocFailStrategy::AllocFailEnum)')
+f(18,7250,1,3,'ChunkPool::allocate(unsigned long, AllocFailStrategy::AllocFailEnum)')
+f(19,7250,1,4,'__libc_malloc')
+f(18,7251,1,4,'__libc_malloc')
+f(15,7252,1,3,'PhaseIdealLoop::set_idom(Node*, Node*, unsigned int)')
+f(16,7252,1,3,'Arena::Arealloc(void*, unsigned long, unsigned long, AllocFailStrategy::AllocFailEnum)')
+f(17,7252,1,3,'Arena::grow(unsigned long, AllocFailStrategy::AllocFailEnum)')
+f(18,7252,1,4,'__libc_malloc')
+f(11,7253,3,3,'IdealLoopTree::loop_predication(PhaseIdealLoop*)')
+f(12,7253,3,3,'PhaseIdealLoop::loop_predication_impl(IdealLoopTree*) [clone .part.50]')
+f(13,7253,1,3,'Invariance::clone(Node*, Node*)')
+f(14,7253,1,3,'Node_Array::grow(unsigned int)')
+f(15,7253,1,3,'Arena::Arealloc(void*, unsigned long, unsigned long, AllocFailStrategy::AllocFailEnum)')
+f(16,7253,1,3,'Arena::grow(unsigned long, AllocFailStrategy::AllocFailEnum)')
+f(17,7253,1,3,'ChunkPool::allocate(unsigned long, AllocFailStrategy::AllocFailEnum)')
+f(18,7253,1,4,'__libc_malloc')
+f(13,7254,1,3,'Node_Array::grow(unsigned int)')
+f(14,7254,1,3,'Arena::Arealloc(void*, unsigned long, unsigned long, AllocFailStrategy::AllocFailEnum)')
+f(15,7254,1,3,'Arena::grow(unsigned long, AllocFailStrategy::AllocFailEnum)')
+f(16,7254,1,3,'ChunkPool::allocate(unsigned long, AllocFailStrategy::AllocFailEnum)')
+f(17,7254,1,4,'__libc_malloc')
+f(13,7255,1,3,'PhaseIdealLoop::create_new_if_for_predicate(ProjNode*, Node*, Deoptimization::DeoptReason)')
+f(14,7255,1,3,'PhaseIdealLoop::set_idom(Node*, Node*, unsigned int)')
+f(15,7255,1,3,'Arena::Arealloc(void*, unsigned long, unsigned long, AllocFailStrategy::AllocFailEnum)')
+f(16,7255,1,3,'Arena::grow(unsigned long, AllocFailStrategy::AllocFailEnum)')
+f(17,7255,1,3,'ChunkPool::allocate(unsigned long, AllocFailStrategy::AllocFailEnum)')
+f(18,7255,1,4,'__libc_malloc')
+f(11,7256,11,3,'Node_Array::grow(unsigned int)')
+f(12,7256,11,3,'Arena::Arealloc(void*, unsigned long, unsigned long, AllocFailStrategy::AllocFailEnum)')
+f(13,7256,11,3,'Arena::grow(unsigned long, AllocFailStrategy::AllocFailEnum)')
+f(14,7256,1,3,'ChunkPool::allocate(unsigned long, AllocFailStrategy::AllocFailEnum)')
+f(15,7256,1,4,'__libc_malloc')
+f(14,7257,10,4,'__libc_malloc')
+f(11,7267,45,3,'PhaseIdealLoop::Dominators()')
+f(12,7267,45,3,'Arena::grow(unsigned long, AllocFailStrategy::AllocFailEnum)')
+f(13,7267,3,3,'ChunkPool::allocate(unsigned long, AllocFailStrategy::AllocFailEnum)')
+f(14,7267,3,4,'__libc_malloc')
+f(13,7270,42,4,'__libc_malloc')
+f(11,7312,2,3,'PhaseIdealLoop::split_if_with_blocks(VectorSet&, Node_Stack&)')
+f(12,7312,1,3,'PhaseIdealLoop::do_split_if(Node*)')
+f(13,7312,1,3,'PhaseIdealLoop::split_thru_region(Node*, Node*)')
+f(14,7312,1,3,'PhaseIdealLoop::set_idom(Node*, Node*, unsigned int)')
+f(15,7312,1,3,'Arena::Arealloc(void*, unsigned long, unsigned long, AllocFailStrategy::AllocFailEnum)')
+f(16,7312,1,3,'Arena::grow(unsigned long, AllocFailStrategy::AllocFailEnum)')
+f(17,7312,1,4,'__libc_malloc')
+f(12,7313,1,3,'PhaseIdealLoop::split_if_with_blocks_post(Node*)')
+f(13,7313,1,3,'PhaseIdealLoop::split_thru_phi(Node*, Node*, int)')
+f(14,7313,1,3,'PhiNode::make_blank(Node*, Node*)')
+f(15,7313,1,3,'Node::Node(unsigned int)')
+f(16,7313,1,3,'Arena::grow(unsigned long, AllocFailStrategy::AllocFailEnum)')
+f(17,7313,1,3,'ChunkPool::allocate(unsigned long, AllocFailStrategy::AllocFailEnum)')
+f(18,7313,1,4,'__libc_malloc')
+f(11,7314,5,3,'PhaseIterGVN::optimize()')
+f(12,7314,5,3,'PhaseIterGVN::transform_old(Node*)')
+f(13,7314,1,3,'ConvI2LNode::Ideal(PhaseGVN*, bool)')
+f(14,7314,1,3,'PhaseIterGVN::transform_old(Node*)')
+f(15,7314,1,3,'PhaseTransform::makecon(Type const*)')
+f(16,7314,1,3,'PhaseValues::uncached_makecon(Type const*)')
+f(17,7314,1,3,'ConNode::make(Compile*, Type const*)')
+f(18,7314,1,3,'Arena::grow(unsigned long, AllocFailStrategy::AllocFailEnum)')
+f(19,7314,1,3,'ChunkPool::allocate(unsigned long, AllocFailStrategy::AllocFailEnum)')
+f(20,7314,1,4,'__libc_malloc')
+f(13,7315,1,3,'IfNode::Ideal(PhaseGVN*, bool)')
+f(14,7315,1,3,'PhaseIterGVN::transform(Node*)')
+f(15,7315,1,3,'Arena::Arealloc(void*, unsigned long, unsigned long, AllocFailStrategy::AllocFailEnum)')
+f(16,7315,1,3,'Arena::grow(unsigned long, AllocFailStrategy::AllocFailEnum)')
+f(17,7315,1,4,'__libc_malloc')
+f(13,7316,1,3,'NodeHash::hash_find_insert(Node*)')
+f(14,7316,1,3,'NodeHash::grow()')
+f(15,7316,1,3,'Arena::grow(unsigned long, AllocFailStrategy::AllocFailEnum)')
+f(16,7316,1,4,'__libc_malloc')
+f(13,7317,1,3,'RegionNode::Ideal(PhaseGVN*, bool)')
+f(14,7317,1,3,'RegionNode::is_unreachable_region(PhaseGVN*) const')
+f(15,7317,1,3,'Node_Array::grow(unsigned int)')
+f(16,7317,1,3,'Arena::Arealloc(void*, unsigned long, unsigned long, AllocFailStrategy::AllocFailEnum)')
+f(17,7317,1,3,'Arena::grow(unsigned long, AllocFailStrategy::AllocFailEnum)')
+f(18,7317,1,3,'ChunkPool::allocate(unsigned long, AllocFailStrategy::AllocFailEnum)')
+f(19,7317,1,4,'__libc_malloc')
+f(13,7318,1,3,'SubINode::Ideal(PhaseGVN*, bool)')
+f(14,7318,1,3,'PhaseIterGVN::transform(Node*)')
+f(15,7318,1,3,'Arena::Arealloc(void*, unsigned long, unsigned long, AllocFailStrategy::AllocFailEnum)')
+f(16,7318,1,3,'Arena::grow(unsigned long, AllocFailStrategy::AllocFailEnum)')
+f(17,7318,1,3,'ChunkPool::allocate(unsigned long, AllocFailStrategy::AllocFailEnum)')
+f(18,7318,1,4,'__libc_malloc')
+f(10,7319,1,3,'PhaseIterGVN::optimize()')
+f(11,7319,1,3,'PhaseIterGVN::transform_old(Node*)')
+f(12,7319,1,3,'NodeHash::hash_find_insert(Node*)')
+f(13,7319,1,3,'NodeHash::grow()')
+f(14,7319,1,3,'Arena::grow(unsigned long, AllocFailStrategy::AllocFailEnum)')
+f(15,7319,1,4,'__libc_malloc')
+f(10,7320,1,3,'PhaseMacroExpand::expand_macro_nodes()')
+f(11,7320,1,3,'PhaseIterGVN::optimize()')
+f(12,7320,1,3,'PhaseIterGVN::transform_old(Node*)')
+f(13,7320,1,3,'IfNode::Ideal(PhaseGVN*, bool)')
+f(14,7320,1,3,'PhaseIterGVN::register_new_node_with_optimizer(Node*, Node*)')
+f(15,7320,1,3,'Arena::Arealloc(void*, unsigned long, unsigned long, AllocFailStrategy::AllocFailEnum)')
+f(16,7320,1,3,'Arena::grow(unsigned long, AllocFailStrategy::AllocFailEnum)')
+f(17,7320,1,4,'__libc_malloc')
+f(9,7321,2,3,'NodeHash::NodeHash(Arena*, unsigned int)')
+f(10,7321,2,3,'Arena::grow(unsigned long, AllocFailStrategy::AllocFailEnum)')
+f(11,7321,1,3,'ChunkPool::allocate(unsigned long, AllocFailStrategy::AllocFailEnum)')
+f(12,7321,1,4,'__libc_malloc')
+f(11,7322,1,4,'__libc_malloc')
+f(9,7323,16,3,'ParseGenerator::generate(JVMState*)')
+f(10,7323,16,3,'Parse::Parse(JVMState*, ciMethod*, float)')
+f(11,7323,16,3,'Parse::do_all_blocks()')
+f(12,7323,1,3,'GraphKit::add_predicate_impl(Deoptimization::DeoptReason, int) [clone .part.189]')
+f(13,7323,1,3,'Arena::grow(unsigned long, AllocFailStrategy::AllocFailEnum)')
+f(14,7323,1,3,'ChunkPool::allocate(unsigned long, AllocFailStrategy::AllocFailEnum)')
+f(15,7323,1,4,'__libc_malloc')
+f(12,7324,15,3,'Parse::do_one_block()')
+f(13,7324,15,3,'Parse::do_one_bytecode()')
+f(14,7324,12,3,'Parse::do_call()')
+f(15,7324,1,3,'GraphKit::kill_dead_locals() [clone .part.184]')
+f(16,7324,1,3,'ciMethod::liveness_at_bci(int)')
+f(17,7324,1,3,'MethodLiveness::compute_liveness()')
+f(18,7324,1,3,'MethodLiveness::init_basic_blocks()')
+f(19,7324,1,3,'Arena::grow(unsigned long, AllocFailStrategy::AllocFailEnum)')
+f(20,7324,1,3,'ChunkPool::allocate(unsigned long, AllocFailStrategy::AllocFailEnum)')
+f(21,7324,1,4,'__libc_malloc')
+f(15,7325,1,3,'LibraryIntrinsic::generate(JVMState*)')
+f(16,7325,1,3,'LibraryCallKit::try_to_inline(int)')
+f(17,7325,1,3,'LibraryCallKit::inline_string_indexOf()')
+f(18,7325,1,3,'PhaseGVN::transform_no_reclaim(Node*)')
+f(19,7325,1,3,'LoadRangeNode::Ideal(PhaseGVN*, bool)')
+f(20,7325,1,3,'MemNode::Ideal_common(PhaseGVN*, bool)')
+f(21,7325,1,3,'Compile::find_alias_type(TypePtr const*, bool, ciField*) [clone .part.206]')
+f(22,7325,1,3,'Compile::flatten_alias_type(TypePtr const*) const')
+f(23,7325,1,3,'Type::hashcons()')
+f(24,7325,1,3,'Dict::Insert(void*, void*, bool)')
+f(25,7325,1,3,'Dict::doubhash()')
+f(26,7325,1,3,'Arena::grow(unsigned long, AllocFailStrategy::AllocFailEnum)')
+f(27,7325,1,3,'ChunkPool::allocate(unsigned long, AllocFailStrategy::AllocFailEnum)')
+f(28,7325,1,4,'__libc_malloc')
+f(15,7326,10,3,'ParseGenerator::generate(JVMState*)')
+f(16,7326,10,3,'Parse::Parse(JVMState*, ciMethod*, float)')
+f(17,7326,1,3,'Parse::build_exits()')
+f(18,7326,1,3,'GraphKit::clone_map()')
+f(19,7326,1,3,'Node::clone() const')
+f(20,7326,1,3,'Arena::grow(unsigned long, AllocFailStrategy::AllocFailEnum)')
+f(21,7326,1,3,'ChunkPool::allocate(unsigned long, AllocFailStrategy::AllocFailEnum)')
+f(22,7326,1,4,'__libc_malloc')
+f(17,7327,1,3,'Parse::create_entry_map()')
+f(18,7327,1,3,'GraphKit::null_check_common(Node*, BasicType, bool, Node**)')
+f(19,7327,1,3,'GraphKit::uncommon_trap(int, ciKlass*, char const*, bool, bool)')
+f(20,7327,1,3,'GraphKit::make_runtime_call(int, TypeFunc const*, unsigned char*, char const*, TypePtr const*, Node*, Node*, Node*, Node*, Node*, Node*, Node*, Node*)')
+f(21,7327,1,3,'GraphKit::set_predefined_output_for_runtime_call(Node*, Node*, TypePtr const*)')
+f(22,7327,1,3,'GraphKit::set_all_memory(Node*)')
+f(23,7327,1,3,'MergeMemNode::make(Compile*, Node*)')
+f(24,7327,1,3,'Arena::grow(unsigned long, AllocFailStrategy::AllocFailEnum)')
+f(25,7327,1,3,'ChunkPool::allocate(unsigned long, AllocFailStrategy::AllocFailEnum)')
+f(26,7327,1,4,'__libc_malloc')
+f(17,7328,8,3,'Parse::do_all_blocks()')
+f(18,7328,8,3,'Parse::do_one_block()')
+f(19,7328,1,3,'JVMState::clone_shallow(Compile*) const')
+f(20,7328,1,3,'Arena::grow(unsigned long, AllocFailStrategy::AllocFailEnum)')
+f(21,7328,1,3,'ChunkPool::allocate(unsigned long, AllocFailStrategy::AllocFailEnum)')
+f(22,7328,1,4,'__libc_malloc')
+f(19,7329,7,3,'Parse::do_one_bytecode()')
+f(20,7329,6,3,'Parse::do_call()')
+f(21,7329,6,3,'ParseGenerator::generate(JVMState*)')
+f(22,7329,6,3,'Parse::Parse(JVMState*, ciMethod*, float)')
+f(23,7329,6,3,'Parse::do_all_blocks()')
+f(24,7329,1,3,'GraphKit::add_predicate_impl(Deoptimization::DeoptReason, int) [clone .part.189]')
+f(25,7329,1,3,'Node::add_out(Node*)')
+f(26,7329,1,3,'Node::out_grow(unsigned int)')
+f(27,7329,1,3,'Arena::grow(unsigned long, AllocFailStrategy::AllocFailEnum)')
+f(28,7329,1,3,'ChunkPool::allocate(unsigned long, AllocFailStrategy::AllocFailEnum)')
+f(29,7329,1,4,'__libc_malloc')
+f(24,7330,5,3,'Parse::do_one_block()')
+f(25,7330,5,3,'Parse::do_one_bytecode()')
+f(26,7330,4,3,'Parse::do_call()')
+f(27,7330,1,3,'GraphKit::round_double_arguments(ciMethod*)')
+f(28,7330,1,3,'TypeFunc::make(ciMethod*)')
+f(29,7330,1,3,'Type::hashcons()')
+f(30,7330,1,3,'Dict::Insert(void*, void*, bool)')
+f(31,7330,1,3,'Dict::doubhash()')
+f(32,7330,1,3,'Arena::grow(unsigned long, AllocFailStrategy::AllocFailEnum)')
+f(33,7330,1,3,'ChunkPool::allocate(unsigned long, AllocFailStrategy::AllocFailEnum)')
+f(34,7330,1,4,'__libc_malloc')
+f(27,7331,3,3,'ParseGenerator::generate(JVMState*)')
+f(28,7331,3,3,'Parse::Parse(JVMState*, ciMethod*, float)')
+f(29,7331,3,3,'Parse::do_all_blocks()')
+f(30,7331,3,3,'Parse::do_one_block()')
+f(31,7331,3,3,'Parse::do_one_bytecode()')
+f(32,7331,3,3,'Parse::do_call()')
+f(33,7331,1,3,'GraphKit::kill_dead_locals() [clone .part.184]')
+f(34,7331,1,3,'ciMethod::liveness_at_bci(int)')
+f(35,7331,1,3,'MethodLiveness::compute_liveness()')
+f(36,7331,1,3,'MethodLiveness::init_basic_blocks()')
+f(37,7331,1,3,'MethodLiveness::BasicBlock::BasicBlock(MethodLiveness*, int, int)')
+f(38,7331,1,3,'GenericGrowableArray::raw_allocate(int)')
+f(39,7331,1,3,'Arena::grow(unsigned long, AllocFailStrategy::AllocFailEnum)')
+f(40,7331,1,3,'ChunkPool::allocate(unsigned long, AllocFailStrategy::AllocFailEnum)')
+f(41,7331,1,4,'__libc_malloc')
+f(33,7332,2,3,'ParseGenerator::generate(JVMState*)')
+f(34,7332,2,3,'Parse::Parse(JVMState*, ciMethod*, float)')
+f(35,7332,2,3,'Parse::do_all_blocks()')
+f(36,7332,2,3,'Parse::do_one_block()')
+f(37,7332,2,3,'Parse::do_one_bytecode()')
+f(38,7332,2,3,'Parse::do_call()')
+f(39,7332,1,3,'Compile::call_generator(ciMethod*, int, bool, JVMState*, bool, float, ciKlass*, bool, bool)')
+f(40,7332,1,3,'InlineTree::ok_to_inline(ciMethod*, JVMState*, ciCallProfile&, WarmCallInfo*, bool&)')
+f(41,7332,1,3,'ciMethod::get_flow_analysis()')
+f(42,7332,1,3,'ciTypeFlow::do_flow()')
+f(43,7332,1,3,'ciTypeFlow::flow_types()')
+f(44,7332,1,3,'ciTypeFlow::clone_loop_heads(ciTypeFlow::Loop*, ciTypeFlow::StateVector*, ciTypeFlow::JsrSet*)')
+f(45,7332,1,3,'ciTypeFlow::clone_loop_head(ciTypeFlow::Loop*, ciTypeFlow::StateVector*, ciTypeFlow::JsrSet*)')
+f(46,7332,1,3,'ciTypeFlow::Block::Block(ciTypeFlow*, ciBlock*, ciTypeFlow::JsrSet*)')
+f(47,7332,1,3,'Arena::grow(unsigned long, AllocFailStrategy::AllocFailEnum)')
+f(48,7332,1,3,'ChunkPool::allocate(unsigned long, AllocFailStrategy::AllocFailEnum)')
+f(49,7332,1,4,'__libc_malloc')
+f(39,7333,1,3,'ParseGenerator::generate(JVMState*)')
+f(40,7333,1,3,'Parse::Parse(JVMState*, ciMethod*, float)')
+f(41,7333,1,3,'Parse::do_all_blocks()')
+f(42,7333,1,3,'Parse::do_one_block()')
+f(43,7333,1,3,'Parse::do_one_bytecode()')
+f(44,7333,1,3,'Parse::do_field_access(bool, bool)')
+f(45,7333,1,3,'Parse::do_get_xxx(Node*, ciField*, bool)')
+f(46,7333,1,3,'GraphKit::basic_plus_adr(Node*, Node*, Node*)')
+f(47,7333,1,3,'Arena::grow(unsigned long, AllocFailStrategy::AllocFailEnum)')
+f(48,7333,1,3,'ChunkPool::allocate(unsigned long, AllocFailStrategy::AllocFailEnum)')
+f(49,7333,1,4,'__libc_malloc')
+f(26,7334,1,3,'Parse::do_field_access(bool, bool)')
+f(27,7334,1,3,'Parse::do_put_xxx(Node*, ciField*, bool)')
+f(28,7334,1,3,'GraphKit::store_oop(Node*, Node*, Node*, TypePtr const*, Node*, TypeOopPtr const*, BasicType, bool, MemNode::MemOrd, bool)')
+f(29,7334,1,3,'GraphKit::store_to_memory(Node*, Node*, Node*, BasicType, int, MemNode::MemOrd, bool, bool, bool)')
+f(30,7334,1,3,'MergeMemNode::set_memory_at(unsigned int, Node*)')
+f(31,7334,1,3,'Node::add_req(Node*)')
+f(32,7334,1,3,'Arena::Arealloc(void*, unsigned long, unsigned long, AllocFailStrategy::AllocFailEnum)')
+f(33,7334,1,3,'Arena::grow(unsigned long, AllocFailStrategy::AllocFailEnum)')
+f(34,7334,1,3,'ChunkPool::allocate(unsigned long, AllocFailStrategy::AllocFailEnum)')
+f(35,7334,1,4,'__libc_malloc')
+f(20,7335,1,3,'Parse::do_field_access(bool, bool)')
+f(21,7335,1,3,'GraphKit::null_check_common(Node*, BasicType, bool, Node**)')
+f(22,7335,1,3,'GraphKit::uncommon_trap(int, ciKlass*, char const*, bool, bool)')
+f(23,7335,1,3,'GraphKit::kill_dead_locals() [clone .part.184]')
+f(24,7335,1,3,'ciMethod::liveness_at_bci(int)')
+f(25,7335,1,3,'MethodLiveness::compute_liveness()')
+f(26,7335,1,3,'MethodLiveness::init_basic_blocks()')
+f(27,7335,1,3,'MethodLiveness::BasicBlock::BasicBlock(MethodLiveness*, int, int)')
+f(28,7335,1,3,'Arena::grow(unsigned long, AllocFailStrategy::AllocFailEnum)')
+f(29,7335,1,3,'ChunkPool::allocate(unsigned long, AllocFailStrategy::AllocFailEnum)')
+f(30,7335,1,4,'__libc_malloc')
+f(14,7336,2,3,'Parse::do_if(BoolTest::mask, Node*)')
+f(15,7336,1,3,'GraphKit::uncommon_trap(int, ciKlass*, char const*, bool, bool)')
+f(16,7336,1,3,'PhaseValues::uncached_makecon(Type const*)')
+f(17,7336,1,3,'ConNode::make(Compile*, Type const*)')
+f(18,7336,1,3,'Node::Node(unsigned int)')
+f(19,7336,1,3,'Compile::grow_node_notes(GrowableArray<Node_Notes*>*, int)')
+f(20,7336,1,3,'Arena::grow(unsigned long, AllocFailStrategy::AllocFailEnum)')
+f(21,7336,1,3,'ChunkPool::allocate(unsigned long, AllocFailStrategy::AllocFailEnum)')
+f(22,7336,1,4,'__libc_malloc')
+f(15,7337,1,3,'PreserveJVMState::PreserveJVMState(GraphKit*, bool)')
+f(16,7337,1,3,'GraphKit::clone_map()')
+f(17,7337,1,3,'Node::clone() const')
+f(18,7337,1,3,'Arena::Arealloc(void*, unsigned long, unsigned long, AllocFailStrategy::AllocFailEnum)')
+f(19,7337,1,3,'Arena::grow(unsigned long, AllocFailStrategy::AllocFailEnum)')
+f(20,7337,1,3,'ChunkPool::allocate(unsigned long, AllocFailStrategy::AllocFailEnum)')
+f(21,7337,1,4,'__libc_malloc')
+f(14,7338,1,3,'Parse::do_ifnull(BoolTest::mask, Node*)')
+f(15,7338,1,3,'GraphKit::uncommon_trap(int, ciKlass*, char const*, bool, bool)')
+f(16,7338,1,3,'GraphKit::kill_dead_locals() [clone .part.184]')
+f(17,7338,1,3,'ciMethod::liveness_at_bci(int)')
+f(18,7338,1,3,'MethodLiveness::compute_liveness()')
+f(19,7338,1,3,'MethodLiveness::init_basic_blocks()')
+f(20,7338,1,3,'MethodLiveness::BasicBlock::BasicBlock(MethodLiveness*, int, int)')
+f(21,7338,1,3,'Arena::grow(unsigned long, AllocFailStrategy::AllocFailEnum)')
+f(22,7338,1,3,'ChunkPool::allocate(unsigned long, AllocFailStrategy::AllocFailEnum)')
+f(23,7338,1,4,'__libc_malloc')
+f(9,7339,2,3,'PhaseRemoveUseless::PhaseRemoveUseless(PhaseGVN*, Unique_Node_List*, Phase::PhaseNumber)')
+f(10,7339,2,3,'Compile::identify_useful_nodes(Unique_Node_List&)')
+f(11,7339,2,3,'Node_Array::grow(unsigned int)')
+f(12,7339,2,3,'Arena::Arealloc(void*, unsigned long, unsigned long, AllocFailStrategy::AllocFailEnum)')
+f(13,7339,2,3,'Arena::grow(unsigned long, AllocFailStrategy::AllocFailEnum)')
+f(14,7339,2,3,'ChunkPool::allocate(unsigned long, AllocFailStrategy::AllocFailEnum)')
+f(15,7339,2,4,'__libc_malloc')
+f(9,7341,1,3,'Type::Initialize(Compile*)')
+f(10,7341,1,3,'Dict::Dict(int (*)(void const*, void const*), int (*)(void const*), Arena*, int)')
+f(11,7341,1,3,'Arena::grow(unsigned long, AllocFailStrategy::AllocFailEnum)')
+f(12,7341,1,3,'ChunkPool::allocate(unsigned long, AllocFailStrategy::AllocFailEnum)')
+f(13,7341,1,4,'__libc_malloc')
+f(9,7342,32,3,'ciEnv::register_method(ciMethod*, int, CodeOffsets*, int, CodeBuffer*, int, OopMapSet*, ExceptionHandlerTable*, ImplicitExceptionTable*, AbstractCompiler*, int, bool, bool, RTMState)')
+f(10,7342,22,3,'nmethod::new_nmethod(methodHandle, int, int, CodeOffsets*, int, DebugInformationRecorder*, Dependencies*, CodeBuffer*, int, OopMapSet*, ExceptionHandlerTable*, ImplicitExceptionTable*, AbstractCompiler*, int)')
+f(11,7342,12,3,'InstanceKlass::add_dependent_nmethod(nmethod*)')
+f(12,7342,12,3,'CHeapObj<(MemoryType)1>::operator new(unsigned long)')
+f(13,7342,12,3,'CHeapObj<(MemoryType)1>::operator new(unsigned long, NativeCallStack const&)')
+f(14,7342,12,4,'__libc_malloc')
+f(11,7354,10,3,'nmethod::nmethod(Method*, int, int, int, CodeOffsets*, int, DebugInformationRecorder*, Dependencies*, CodeBuffer*, int, OopMapSet*, ExceptionHandlerTable*, ImplicitExceptionTable*, AbstractCompiler*, int)')
+f(12,7354,10,3,'CodeBlob::CodeBlob(char const*, CodeBuffer*, int, int, int, int, OopMapSet*)')
+f(13,7354,10,3,'CodeBlob::set_oop_maps(OopMapSet*) [clone .part.5]')
+f(14,7354,10,4,'__libc_malloc')
+f(10,7364,10,3,'nmethod::post_compiled_method_load_event()')
+f(11,7364,10,3,'JvmtiDeferredEventQueue::enqueue(JvmtiDeferredEvent const&)')
+f(12,7364,10,3,'CHeapObj<(MemoryType)7>::operator new(unsigned long)')
+f(13,7364,10,3,'CHeapObj<(MemoryType)7>::operator new(unsigned long, NativeCallStack const&)')
+f(14,7364,10,4,'__libc_malloc')
+f(7,7374,6,3,'Compiler::compile_method(ciEnv*, ciMethod*, int)')
+f(8,7374,6,3,'Compilation::Compilation(AbstractCompiler*, ciEnv*, ciMethod*, int, BufferBlob*)')
+f(9,7374,6,3,'Compilation::compile_method()')
+f(10,7374,1,3,'Compilation::compile_java_method()')
+f(11,7374,1,3,'Compilation::emit_code_body()')
+f(12,7374,1,3,'LIR_Assembler::emit_code(BlockList*)')
+f(13,7374,1,3,'LIR_OpTypeCheck::emit_code(LIR_Assembler*)')
+f(14,7374,1,3,'LIR_Assembler::emit_opTypeCheck(LIR_OpTypeCheck*)')
+f(15,7374,1,3,'LIR_Assembler::emit_typecheck_helper(LIR_OpTypeCheck*, Label*, Label*, Label*)')
+f(16,7374,1,3,'Assembler::jmp(Label&, bool)')
+f(17,7374,1,3,'Label::add_patch_at(CodeBuffer*, int)')
+f(18,7374,1,3,'CodeBuffer::create_patch_overflow()')
+f(19,7374,1,3,'Arena::operator new(unsigned long, MemoryType)')
+f(20,7374,1,4,'__libc_malloc')
+f(10,7375,5,3,'ciEnv::register_method(ciMethod*, int, CodeOffsets*, int, CodeBuffer*, int, OopMapSet*, ExceptionHandlerTable*, ImplicitExceptionTable*, AbstractCompiler*, int, bool, bool, RTMState)')
+f(11,7375,3,3,'nmethod::new_nmethod(methodHandle, int, int, CodeOffsets*, int, DebugInformationRecorder*, Dependencies*, CodeBuffer*, int, OopMapSet*, ExceptionHandlerTable*, ImplicitExceptionTable*, AbstractCompiler*, int)')
+f(12,7375,1,3,'InstanceKlass::add_dependent_nmethod(nmethod*)')
+f(13,7375,1,3,'CHeapObj<(MemoryType)1>::operator new(unsigned long)')
+f(14,7375,1,3,'CHeapObj<(MemoryType)1>::operator new(unsigned long, NativeCallStack const&)')
+f(15,7375,1,4,'__libc_malloc')
+f(12,7376,2,3,'nmethod::nmethod(Method*, int, int, int, CodeOffsets*, int, DebugInformationRecorder*, Dependencies*, CodeBuffer*, int, OopMapSet*, ExceptionHandlerTable*, ImplicitExceptionTable*, AbstractCompiler*, int)')
+f(13,7376,2,3,'CodeBlob::CodeBlob(char const*, CodeBuffer*, int, int, int, int, OopMapSet*)')
+f(14,7376,2,3,'CodeBlob::set_oop_maps(OopMapSet*) [clone .part.5]')
+f(15,7376,2,4,'__libc_malloc')
+f(11,7378,2,3,'nmethod::post_compiled_method_load_event()')
+f(12,7378,2,3,'JvmtiDeferredEventQueue::enqueue(JvmtiDeferredEvent const&)')
+f(13,7378,2,3,'CHeapObj<(MemoryType)7>::operator new(unsigned long)')
+f(14,7378,2,3,'CHeapObj<(MemoryType)7>::operator new(unsigned long, NativeCallStack const&)')
+f(15,7378,2,4,'__libc_malloc')
+f(7,7380,2,3,'ciEnv::ciEnv(CompileTask*, int)')
+f(8,7380,1,3,'Arena::Arena(MemoryType)')
+f(9,7380,1,3,'ChunkPool::allocate(unsigned long, AllocFailStrategy::AllocFailEnum)')
+f(10,7380,1,4,'__libc_malloc')
+f(8,7381,1,3,'ciObjectFactory::ciObjectFactory(Arena*, int)')
+f(9,7381,1,3,'GenericGrowableArray::raw_allocate(int)')
+f(10,7381,1,3,'Arena::grow(unsigned long, AllocFailStrategy::AllocFailEnum)')
+f(11,7381,1,3,'ChunkPool::allocate(unsigned long, AllocFailStrategy::AllocFailEnum)')
+f(12,7381,1,4,'__libc_malloc')
+f(5,7382,12,3,'ServiceThread::service_thread_entry(JavaThread*, Thread*)')
+f(6,7382,12,3,'JvmtiDeferredEvent::post()')
+f(7,7382,12,3,'JvmtiExport::post_compiled_method_load(nmethod*)')
+f(8,7382,12,3,'JvmtiCodeBlobEvents::build_jvmti_addr_location_map(nmethod*, _jvmtiAddrLocationMap**, int*)')
+f(9,7382,12,4,'__libc_malloc')
+f(5,7394,19,4,'attach_listener_thread_entry(JavaThread*, Thread*)')
+f(6,7394,1,3,'AttachListener::dequeue()')
+f(7,7394,1,3,'LinuxAttachListener::dequeue()')
+f(8,7394,1,3,'LinuxAttachListener::read_request(int)')
+f(9,7394,1,3,'CHeapObj<(MemoryType)7>::operator new(unsigned long)')
+f(10,7394,1,3,'CHeapObj<(MemoryType)7>::operator new(unsigned long, NativeCallStack const&)')
+f(11,7394,1,4,'__libc_malloc')
+f(6,7395,17,3,'JvmtiExport::load_agent_library(AttachOperation*, outputStream*)')
+f(7,7395,1,4,'Agent_OnAttach')
+f(8,7395,1,4,'__libc_malloc')
+f(7,7396,1,3,'CHeapObj<(MemoryType)7>::operator new(unsigned long)')
+f(8,7396,1,3,'CHeapObj<(MemoryType)7>::operator new(unsigned long, NativeCallStack const&)')
+f(9,7396,1,4,'__libc_malloc')
+f(7,7397,2,4,'__libc_malloc')
+f(7,7399,11,3,'os::dll_load(char const*, char*, int)')
+f(8,7399,1,3,'ElfFile::ElfFile(char const*)')
+f(9,7399,1,4,'__libc_malloc')
+f(8,7400,10,3,'ElfFile::load_tables()')
+f(9,7400,5,3,'CHeapObj<(MemoryType)7>::operator new(unsigned long, std::nothrow_t const&) [clone .isra.2]')
+f(10,7400,5,4,'__libc_malloc')
+f(9,7405,3,3,'ElfStringTable::ElfStringTable(_IO_FILE*, Elf64_Shdr, int)')
+f(10,7405,3,4,'__libc_malloc')
+f(9,7408,2,3,'ElfSymbolTable::ElfSymbolTable(_IO_FILE*, Elf64_Shdr)')
+f(10,7408,2,4,'__libc_malloc')
+f(7,7410,1,3,'os::find_agent_function(AgentLibrary*, bool, char const**, unsigned long)')
+f(8,7410,1,3,'os::build_agent_function_name(char const*, char const*, bool)')
+f(9,7410,1,4,'__libc_malloc')
+f(7,7411,1,3,'os::find_builtin_agent(AgentLibrary*, char const**, unsigned long)')
+f(8,7411,1,3,'os::build_agent_function_name(char const*, char const*, bool)')
+f(9,7411,1,4,'__libc_malloc')
+f(6,7412,1,3,'bufferedStream::bufferedStream(unsigned long, unsigned long)')
+f(7,7412,1,4,'__libc_malloc')
+render();
+</script></body></html>

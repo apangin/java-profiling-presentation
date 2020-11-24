@@ -9,7 +9,7 @@ import java.util.concurrent.TimeUnit;
  * This example shows how async-profiler helps to find the origin
  * of an exception when no exception stack trace is printed.
  *
- * Run profiler with `-e Java_java_lang_Throwable_fillInStackTrace`
+ * Run profiler with `-e java.lang.NullPointerException.\<init\>`
  */
 public class ClassAnalyzer implements Runnable {
     private final ClassPathScanner scanner;

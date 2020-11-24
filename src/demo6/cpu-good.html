@@ -1,0 +1,791 @@
+<!DOCTYPE html>
+<html lang='en'>
+<head>
+<meta charset='utf-8'>
+<style>
+	body {margin: 0; padding: 10px; background-color: #ffffff}
+	h1 {margin: 5px 0 0 0; font-size: 18px; font-weight: normal; text-align: center}
+	header {margin: -24px 0 5px 0; line-height: 24px}
+	button {font: 12px sans-serif; cursor: pointer}
+	p {margin: 5px 0 5px 0}
+	a {color: #0366d6}
+	#hl {position: absolute; display: none; overflow: hidden; white-space: nowrap; pointer-events: none; background-color: #ffffe0; outline: 1px solid #ffc000; height: 15px}
+	#hl span {padding: 0 3px 0 3px}
+	#status {overflow: hidden; white-space: nowrap}
+	#match {overflow: hidden; white-space: nowrap; display: none; float: right; text-align: right}
+	#reset {cursor: pointer}
+</style>
+</head>
+<body style='font: 12px Verdana, sans-serif'>
+<h1>Flame Graph</h1>
+<header style='text-align: left'><button id='reverse' title='Reverse'>&#x1f53b;</button>&nbsp;&nbsp;<button id='search' title='Search'>&#x1f50d;</button></header>
+<header style='text-align: right'>Produced by <a href='https://github.com/jvm-profiling-tools/async-profiler'>async-profiler</a></header>
+<canvas id='canvas' style='width: 100%; height: 896px'></canvas>
+<div id='hl'><span></span></div>
+<p id='match'>Matched: <span id='matchval'></span> <span id='reset' title='Clear'>&#x274c;</span></p>
+<p id='status'>&nbsp;</p>
+<script>
+	// Copyright 2020 Andrei Pangin
+	// Licensed under the Apache License, Version 2.0.
+	'use strict';
+	var root, rootLevel, px, pattern;
+	var reverse = false;
+	const levels = Array(56);
+	for (let h = 0; h < levels.length; h++) {
+		levels[h] = [];
+	}
+
+	const canvas = document.getElementById('canvas');
+	const c = canvas.getContext('2d');
+	const hl = document.getElementById('hl');
+	const status = document.getElementById('status');
+
+	const canvasWidth = canvas.offsetWidth;
+	const canvasHeight = canvas.offsetHeight;
+	canvas.style.width = canvasWidth + 'px';
+	canvas.width = canvasWidth * (devicePixelRatio || 1);
+	canvas.height = canvasHeight * (devicePixelRatio || 1);
+	if (devicePixelRatio) c.scale(devicePixelRatio, devicePixelRatio);
+	c.font = document.body.style.font;
+
+	const palette = [
+		[0x50e150, 30, 30, 30],
+		[0x50bebe, 30, 30, 30],
+		[0xe17d00, 30, 30,  0],
+		[0xc8c83c, 30, 30, 10],
+		[0xe15a5a, 30, 40, 40],
+	];
+
+	function getColor(p) {
+		const v = Math.random();
+		return '#' + (p[0] + ((p[1] * v) << 16 | (p[2] * v) << 8 | (p[3] * v))).toString(16);
+	}
+
+	function f(level, left, width, type, title) {
+		levels[level].push({left: left, width: width, color: getColor(palette[type]), title: title});
+	}
+
+	function samples(n) {
+		return n === 1 ? '1 sample' : n.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ',') + ' samples';
+	}
+
+	function pct(a, b) {
+		return a >= b ? '100' : (100 * a / b).toFixed(2);
+	}
+
+	function findFrame(frames, x) {
+		let left = 0;
+		let right = frames.length - 1;
+
+		while (left <= right) {
+			const mid = (left + right) >>> 1;
+			const f = frames[mid];
+
+			if (f.left > x) {
+				right = mid - 1;
+			} else if (f.left + f.width <= x) {
+				left = mid + 1;
+			} else {
+				return f;
+			}
+		}
+
+		if (frames[left] && (frames[left].left - x) * px < 0.5) return frames[left];
+		if (frames[right] && (x - (frames[right].left + frames[right].width)) * px < 0.5) return frames[right];
+
+		return null;
+	}
+
+	function search(r) {
+		if (r && (r = prompt('Enter regexp to search:', '')) === null) {
+			return;
+		}
+
+		pattern = r ? RegExp(r) : undefined;
+		const matched = render(root, rootLevel);
+		document.getElementById('matchval').textContent = pct(matched, root.width) + '%';
+		document.getElementById('match').style.display = r ? 'inherit' : 'none';
+	}
+
+	function render(newRoot, newLevel) {
+		if (root) {
+			c.fillStyle = '#ffffff';
+			c.fillRect(0, 0, canvasWidth, canvasHeight);
+		}
+
+		root = newRoot || levels[0][0];
+		rootLevel = newLevel || 0;
+		px = canvasWidth / root.width;
+
+		const x0 = root.left;
+		const x1 = x0 + root.width;
+		const marked = [];
+
+		function mark(f) {
+			return marked[f.left] >= f.width || (marked[f.left] = f.width);
+		}
+
+		function totalMarked() {
+			let total = 0;
+			let left = 0;
+			for (let x in marked) {
+				if (+x >= left) {
+					total += marked[x];
+					left = +x + marked[x];
+				}
+			}
+			return total;
+		}
+
+		function drawFrame(f, y, alpha) {
+			if (f.left < x1 && f.left + f.width > x0) {
+				c.fillStyle = pattern && f.title.match(pattern) && mark(f) ? '#ee00ee' : f.color;
+				c.fillRect((f.left - x0) * px, y, f.width * px, 15);
+
+				if (f.width * px >= 21) {
+					const chars = Math.floor(f.width * px / 7);
+					const title = f.title.length <= chars ? f.title : f.title.substring(0, chars - 2) + '..';
+					c.fillStyle = '#000000';
+					c.fillText(title, Math.max(f.left - x0, 0) * px + 3, y + 12, f.width * px - 6);
+				}
+
+				if (alpha) {
+					c.fillStyle = 'rgba(255, 255, 255, 0.5)';
+					c.fillRect((f.left - x0) * px, y, f.width * px, 15);
+				}
+			}
+		}
+
+		for (let h = 0; h < levels.length; h++) {
+			const y = reverse ? h * 16 : canvasHeight - (h + 1) * 16;
+			const frames = levels[h];
+			for (let i = 0; i < frames.length; i++) {
+				drawFrame(frames[i], y, h < rootLevel);
+			}
+		}
+
+		return totalMarked();
+	}
+
+	canvas.onmousemove = function() {
+		const h = Math.floor((reverse ? event.offsetY : (canvasHeight - event.offsetY)) / 16);
+		if (h >= 0 && h < levels.length) {
+			const f = findFrame(levels[h], event.offsetX / px + root.left);
+			if (f) {
+				hl.style.left = (Math.max(f.left - root.left, 0) * px + canvas.offsetLeft) + 'px';
+				hl.style.width = (Math.min(f.width, root.width) * px) + 'px';
+				hl.style.top = ((reverse ? h * 16 : canvasHeight - (h + 1) * 16) + canvas.offsetTop) + 'px';
+				hl.firstChild.textContent = f.title;
+				hl.style.display = 'block';
+				canvas.title = f.title + '\n(' + samples(f.width) + ', ' + pct(f.width, levels[0][0].width) + '%)';
+				canvas.style.cursor = 'pointer';
+				canvas.onclick = function() {
+					if (f != root) {
+						render(f, h);
+						canvas.onmousemove();
+					}
+				};
+				status.textContent = 'Function: ' + canvas.title;
+				return;
+			}
+		}
+		canvas.onmouseout();
+	}
+
+	canvas.onmouseout = function() {
+		hl.style.display = 'none';
+		status.textContent = '\xa0';
+		canvas.title = '';
+		canvas.style.cursor = '';
+		canvas.onclick = '';
+	}
+
+	document.getElementById('reverse').onclick = function() {
+		reverse = !reverse;
+		render();
+	}
+
+	document.getElementById('search').onclick = function() {
+		search(true);
+	}
+
+	document.getElementById('reset').onclick = function() {
+		search(false);
+	}
+
+	window.onkeydown = function() {
+		if (event.ctrlKey && event.keyCode === 70) {
+			event.preventDefault();
+			search(true);
+		} else if (event.keyCode === 27) {
+			search(false);
+		}
+	}
+f(0,0,2054,4,'all')
+f(1,0,2054,0,'java/lang/Thread.run')
+f(2,0,2054,0,'java/util/concurrent/ThreadPoolExecutor$Worker.run')
+f(3,0,2054,0,'java/util/concurrent/ThreadPoolExecutor.runWorker')
+f(4,0,2054,0,'demo6/OneNioTest$$Lambda$1/2036368507.run')
+f(5,0,2054,0,'demo6/OneNioTest.sendLoop')
+f(6,4,2050,0,'one/nio/net/NativeSocket.send')
+f(7,4,2050,0,'one/nio/net/NativeSocket.sendTo')
+f(8,6,3,0,'java/nio/Buffer.position')
+f(8,9,2045,0,'one/nio/net/NativeSocket.sendTo1')
+f(9,13,4,4,'Java_one_nio_net_NativeSocket_sendTo1')
+f(9,17,30,4,'[unknown]')
+f(10,17,30,4,'[unknown]')
+f(11,17,1,4,'jni_GetArrayLength')
+f(11,18,1,4,'jni_GetByteArrayRegion')
+f(11,19,28,4,'sockaddr_from_java')
+f(12,19,2,3,'HandleMark::pop_and_restore()')
+f(12,21,2,3,'ThreadStateTransition::transition_and_fence(JavaThread*, JavaThreadState, JavaThreadState) [clone .constprop.95]')
+f(12,23,3,3,'ThreadStateTransition::transition_from_native(JavaThread*, JavaThreadState) [clone .constprop.96]')
+f(12,26,7,4,'__memmove_ssse3_back')
+f(12,33,2,4,'jni_GetArrayLength')
+f(13,34,1,3,'ThreadStateTransition::transition_from_native(JavaThread*, JavaThreadState) [clone .constprop.96]')
+f(12,35,12,4,'jni_GetByteArrayRegion')
+f(13,42,3,3,'HandleMark::pop_and_restore()')
+f(13,45,2,3,'ThreadStateTransition::transition_from_native(JavaThread*, JavaThreadState) [clone .constprop.96]')
+f(9,47,2000,4,'__libc_sendto')
+f(10,136,1911,2,'entry_SYSCALL_64_after_hwframe')
+f(11,136,2,2,'__x64_sys_sendto')
+f(11,138,1907,2,'do_syscall_64')
+f(12,171,1,2,'__audit_syscall_entry')
+f(12,172,1842,2,'__x64_sys_sendto')
+f(13,172,1835,2,'__sys_sendto')
+f(14,180,2,2,'__fdget')
+f(14,182,1,2,'_copy_from_user')
+f(14,183,7,2,'fput')
+f(15,183,7,2,'fput_many')
+f(14,190,1,2,'fput_many')
+f(14,191,1,2,'import_single_range')
+f(15,191,1,2,'iov_iter_init')
+f(14,192,1,2,'iov_iter_init')
+f(14,193,8,2,'move_addr_to_kernel.part.22')
+f(15,195,1,2,'__check_object_size')
+f(15,196,1,2,'_copy_from_user')
+f(15,197,1,2,'check_stack_object')
+f(15,198,3,2,'copy_user_generic_unrolled')
+f(14,201,1,2,'security_socket_sendmsg')
+f(14,202,1792,2,'sock_sendmsg')
+f(15,210,1763,2,'inet6_sendmsg')
+f(16,215,1,2,'udp_sendmsg')
+f(16,216,1757,2,'udpv6_sendmsg')
+f(17,227,1,2,'apic_timer_interrupt')
+f(18,227,1,2,'smp_apic_timer_interrupt')
+f(19,227,1,2,'irq_exit')
+f(20,227,1,2,'__softirqentry_text_start')
+f(21,227,1,2,'rcu_core_si')
+f(22,227,1,2,'rcu_core')
+f(23,227,1,2,'rcu_report_qs_rnp')
+f(24,227,1,2,'rcu_gp_kthread_wake')
+f(25,227,1,2,'swake_up_one')
+f(26,227,1,2,'_raw_spin_unlock_irqrestore')
+f(17,228,1,2,'ip_make_skb')
+f(17,229,1,2,'security_sk_classify_flow')
+f(17,230,1,2,'udp_send_skb.isra.47')
+f(17,231,1742,2,'udp_sendmsg')
+f(18,247,1,2,'__ip_append_data.isra.54')
+f(18,248,2,2,'__ip_make_skb')
+f(18,250,132,2,'ip_make_skb')
+f(19,252,95,2,'__ip_append_data.isra.54')
+f(20,262,2,2,'__check_object_size')
+f(20,264,37,2,'ip_generic_getfrag')
+f(21,268,16,2,'__check_object_size')
+f(22,271,2,2,'__check_heap_object')
+f(22,273,11,2,'__virt_addr_valid')
+f(21,284,16,2,'_copy_from_iter_full')
+f(22,286,13,2,'copy_user_generic_unrolled')
+f(22,299,1,2,'iov_iter_advance')
+f(21,300,1,2,'iov_iter_advance')
+f(20,301,46,2,'sock_alloc_send_skb')
+f(21,301,46,2,'sock_alloc_send_pskb')
+f(22,303,1,2,'__alloc_skb')
+f(22,304,39,2,'alloc_skb_with_frags')
+f(23,305,37,2,'__alloc_skb')
+f(24,314,7,2,'__kmalloc_reserve.isra.46')
+f(25,315,5,2,'__kmalloc_node_track_caller')
+f(26,319,1,2,'kmalloc_slab')
+f(25,320,1,2,'_cond_resched')
+f(24,321,3,2,'__ksize')
+f(24,324,2,2,'_cond_resched')
+f(24,326,14,2,'kmem_cache_alloc_node')
+f(25,335,1,2,'_cond_resched')
+f(25,336,4,2,'rcu_all_qs')
+f(24,340,1,2,'ksize')
+f(25,340,1,2,'__ksize')
+f(24,341,1,2,'should_failslab')
+f(23,342,1,2,'__kmalloc_reserve.isra.46')
+f(22,343,4,2,'skb_set_owner_w')
+f(19,347,21,2,'__ip_make_skb')
+f(20,355,11,2,'__ip_select_ident')
+f(21,356,7,2,'ip_idents_reserve')
+f(21,363,3,2,'siphash_3u32')
+f(20,366,2,2,'ipv4_mtu')
+f(19,368,3,2,'ip_generic_getfrag')
+f(19,371,3,2,'ip_setup_cork')
+f(19,374,7,2,'ipv4_mtu')
+f(19,381,1,2,'sock_alloc_send_skb')
+f(18,382,27,2,'ip_route_output_flow')
+f(19,382,26,2,'ip_route_output_key_hash')
+f(20,382,26,2,'ip_route_output_key_hash_rcu')
+f(21,391,2,2,'__ip_dev_find')
+f(22,391,2,2,'inet_lookup_ifaddr_rcu')
+f(21,393,15,2,'fib_table_lookup')
+f(19,408,1,2,'xfrm_lookup_route')
+f(20,408,1,2,'xfrm_lookup_with_ifid')
+f(18,409,3,2,'security_sk_classify_flow')
+f(18,412,4,2,'selinux_sk_getsecid')
+f(18,416,2,2,'udp4_hwcsum')
+f(18,418,1555,2,'udp_send_skb.isra.47')
+f(19,420,1,2,'ip_local_out')
+f(19,421,1549,2,'ip_send_skb')
+f(20,422,1545,2,'ip_local_out')
+f(21,424,199,2,'__ip_local_out')
+f(22,427,3,2,'__x86_indirect_thunk_rax')
+f(22,430,6,2,'iptable_filter_hook?[iptable_filter]')
+f(22,436,4,2,'iptable_mangle_hook?[iptable_mangle]')
+f(23,439,1,2,'apic_timer_interrupt')
+f(24,439,1,2,'smp_apic_timer_interrupt')
+f(25,439,1,2,'irq_exit')
+f(26,439,1,2,'__softirqentry_text_start')
+f(27,439,1,2,'rcu_core_si')
+f(28,439,1,2,'rcu_core')
+f(22,440,10,2,'iptable_raw_hook?[iptable_raw]')
+f(22,450,3,2,'iptable_security_hook?[iptable_security]')
+f(22,453,6,2,'ipv4_conntrack_defrag?[nf_defrag_ipv4]')
+f(22,459,7,2,'ipv4_conntrack_local?[nf_conntrack]')
+f(22,466,147,2,'nf_hook_slow')
+f(23,473,1,2,'ipt_do_table?[ip_tables]')
+f(23,474,10,2,'iptable_filter_hook?[iptable_filter]')
+f(24,474,1,2,'__local_bh_enable_ip')
+f(24,475,9,2,'ipt_do_table?[ip_tables]')
+f(25,483,1,2,'__local_bh_enable_ip')
+f(23,484,27,2,'iptable_mangle_hook?[iptable_mangle]')
+f(24,488,23,2,'ipt_do_table?[ip_tables]')
+f(23,511,14,2,'iptable_raw_hook?[iptable_raw]')
+f(24,512,2,2,'__local_bh_enable_ip')
+f(24,514,11,2,'ipt_do_table?[ip_tables]')
+f(23,525,21,2,'iptable_security_hook?[iptable_security]')
+f(24,525,21,2,'ipt_do_table?[ip_tables]')
+f(23,546,51,2,'ipv4_conntrack_local?[nf_conntrack]')
+f(24,546,1,2,'get_l4proto?[nf_conntrack]')
+f(24,547,1,2,'hash_conntrack_raw?[nf_conntrack]')
+f(24,548,48,2,'nf_conntrack_in?[nf_conntrack]')
+f(25,564,17,2,'__nf_conntrack_find_get?[nf_conntrack]')
+f(25,581,1,2,'get_l4proto?[nf_conntrack]')
+f(25,582,6,2,'hash_conntrack_raw?[nf_conntrack]')
+f(25,588,2,2,'nf_conntrack_udp_packet?[nf_conntrack]')
+f(25,590,5,2,'nf_ct_get_tuple?[nf_conntrack]')
+f(26,593,2,2,'nf_ct_get_tuple_ports.isra.31?[nf_conntrack]')
+f(25,595,1,2,'nf_ct_get_tuple_ports.isra.31?[nf_conntrack]')
+f(24,596,1,2,'nf_conntrack_udp_packet?[nf_conntrack]')
+f(23,597,2,2,'netlbl_enabled')
+f(23,599,1,2,'nf_conntrack_in?[nf_conntrack]')
+f(23,600,12,2,'nf_nat_ipv4_local_fn?[nf_nat]')
+f(24,603,2,2,'nf_nat_inet_fn?[nf_nat]')
+f(24,605,7,2,'nf_nat_ipv4_fn?[nf_nat]')
+f(25,606,4,2,'nf_nat_inet_fn?[nf_nat]')
+f(25,610,2,2,'nf_nat_packet?[nf_nat]')
+f(23,612,1,2,'selinux_ipv4_output')
+f(24,612,1,2,'netlbl_enabled')
+f(22,613,6,2,'nf_nat_ipv4_local_fn?[nf_nat]')
+f(22,619,4,2,'selinux_ipv4_output')
+f(21,623,1343,2,'ip_output')
+f(22,628,1,2,'__ip_finish_output')
+f(22,629,1303,2,'ip_finish_output')
+f(23,630,1301,2,'__ip_finish_output')
+f(24,632,1,2,'__local_bh_enable_ip')
+f(24,633,1296,2,'ip_finish_output2')
+f(25,639,1221,2,'__local_bh_enable_ip')
+f(26,640,1220,2,'do_softirq')
+f(27,646,1214,2,'do_softirq_own_stack')
+f(28,646,1210,2,'__softirqentry_text_start')
+f(29,651,1,2,'__x86_indirect_thunk_rax')
+f(29,652,1201,2,'net_rx_action')
+f(30,659,1,2,'__kfree_skb_flush')
+f(30,660,1193,2,'process_backlog')
+f(31,669,1184,2,'__netif_receive_skb')
+f(32,670,1183,2,'__netif_receive_skb_one_core')
+f(33,672,13,2,'__netif_receive_skb_core')
+f(33,685,1167,2,'ip_rcv')
+f(34,688,3,2,'__x86_indirect_thunk_rax')
+f(34,691,4,2,'ip_local_deliver')
+f(34,695,5,2,'ip_rcv_core.isra.18')
+f(34,700,857,2,'ip_rcv_finish')
+f(35,700,851,2,'ip_local_deliver')
+f(36,708,1,2,'__x86_indirect_thunk_rax')
+f(36,709,703,2,'ip_local_deliver_finish')
+f(37,710,1,2,'icmp_rcv')
+f(37,711,699,2,'ip_protocol_deliver_rcu')
+f(38,720,1,2,'__udp4_lib_rcv')
+f(38,721,46,2,'icmp_rcv')
+f(39,730,16,2,'consume_skb')
+f(40,732,4,2,'kfree_skbmem')
+f(41,732,4,2,'kmem_cache_free')
+f(40,736,10,2,'skb_release_all')
+f(41,737,2,2,'skb_release_data')
+f(42,738,1,2,'skb_free_head')
+f(43,738,1,2,'kfree')
+f(41,739,7,2,'skb_release_head_state')
+f(42,742,4,2,'dst_release')
+f(39,746,21,2,'icmp_unreach')
+f(40,746,18,2,'icmp_socket_deliver')
+f(41,746,7,2,'_raw_read_lock')
+f(41,753,5,2,'raw_icmp_error')
+f(41,758,6,2,'udp_err')
+f(42,758,6,2,'__udp4_lib_err')
+f(43,762,2,2,'__udp4_lib_lookup')
+f(44,763,1,2,'udp4_lib_lookup2')
+f(40,764,2,2,'raw_icmp_error')
+f(40,766,1,2,'udp_err')
+f(38,767,2,2,'icmp_unreach')
+f(38,769,3,2,'raw_local_deliver')
+f(38,772,638,2,'udp_rcv')
+f(39,773,1,2,'__icmp_send')
+f(39,774,633,2,'__udp4_lib_rcv')
+f(40,792,580,2,'__icmp_send')
+f(41,813,1,2,'__xfrm_decode_session')
+f(41,814,4,2,'_raw_spin_trylock')
+f(41,818,432,2,'icmp_push_reply')
+f(42,823,2,2,'__ip_append_data.isra.54')
+f(42,825,1,2,'csum_partial_copy_generic')
+f(42,826,79,2,'ip_append_data')
+f(43,831,58,2,'__ip_append_data.isra.54')
+f(44,839,23,2,'icmp_glue_bits')
+f(45,839,1,2,'csum_partial_copy_nocheck')
+f(45,840,22,2,'skb_copy_and_csum_bits')
+f(46,846,16,2,'csum_partial_copy_generic')
+f(44,862,27,2,'sock_alloc_send_skb')
+f(45,862,1,2,'skb_set_owner_w')
+f(45,863,26,2,'sock_alloc_send_pskb')
+f(46,865,20,2,'alloc_skb_with_frags')
+f(47,867,18,2,'__alloc_skb')
+f(48,873,4,2,'__kmalloc_reserve.isra.46')
+f(49,873,4,2,'__kmalloc_node_track_caller')
+f(50,876,1,2,'kmalloc_slab')
+f(48,877,3,2,'__ksize')
+f(48,880,5,2,'kmem_cache_alloc_node')
+f(46,885,4,2,'skb_set_owner_w')
+f(43,889,2,2,'icmp_glue_bits')
+f(43,891,12,2,'ip_setup_cork')
+f(44,897,1,2,'ipv4_mtu')
+f(44,898,5,2,'kmem_cache_alloc_trace')
+f(43,903,2,2,'ipv4_mtu')
+f(42,905,344,2,'ip_push_pending_frames')
+f(43,905,27,2,'__ip_make_skb')
+f(44,908,15,2,'__ip_select_ident')
+f(45,909,9,2,'ip_idents_reserve')
+f(45,918,5,2,'siphash_3u32')
+f(44,923,4,2,'icmp_out_count')
+f(44,927,1,2,'ipv4_mtu')
+f(44,928,1,2,'memcpy')
+f(44,929,2,2,'memcpy_orig')
+f(44,931,1,2,'siphash_3u32')
+f(43,932,1,2,'icmp_out_count')
+f(43,933,1,2,'ip_options_build')
+f(43,934,310,2,'ip_send_skb')
+f(44,934,307,2,'ip_local_out')
+f(45,935,172,2,'__ip_local_out')
+f(46,936,1,2,'__x86_indirect_thunk_rax')
+f(46,937,7,2,'iptable_filter_hook?[iptable_filter]')
+f(46,944,3,2,'iptable_mangle_hook?[iptable_mangle]')
+f(46,947,4,2,'iptable_raw_hook?[iptable_raw]')
+f(46,951,4,2,'iptable_security_hook?[iptable_security]')
+f(46,955,2,2,'ipv4_conntrack_defrag?[nf_defrag_ipv4]')
+f(46,957,140,2,'nf_hook_slow')
+f(47,962,1,2,'ipt_do_table?[ip_tables]')
+f(47,963,9,2,'iptable_filter_hook?[iptable_filter]')
+f(48,963,9,2,'ipt_do_table?[ip_tables]')
+f(49,970,2,2,'__local_bh_enable_ip')
+f(47,972,12,2,'iptable_mangle_hook?[iptable_mangle]')
+f(48,973,11,2,'ipt_do_table?[ip_tables]')
+f(49,983,1,2,'__local_bh_enable_ip')
+f(47,984,18,2,'iptable_raw_hook?[iptable_raw]')
+f(48,984,18,2,'ipt_do_table?[ip_tables]')
+f(47,1002,21,2,'iptable_security_hook?[iptable_security]')
+f(48,1002,1,2,'__local_bh_enable_ip')
+f(48,1003,20,2,'ipt_do_table?[ip_tables]')
+f(49,1020,3,2,'__local_bh_enable_ip')
+f(47,1023,1,2,'ipv4_conntrack_defrag?[nf_defrag_ipv4]')
+f(47,1024,46,2,'ipv4_conntrack_local?[nf_conntrack]')
+f(48,1025,2,2,'get_l4proto?[nf_conntrack]')
+f(48,1027,1,2,'nf_conntrack_icmpv4_error?[nf_conntrack]')
+f(48,1028,42,2,'nf_conntrack_in?[nf_conntrack]')
+f(49,1033,1,2,'get_l4proto?[nf_conntrack]')
+f(49,1034,35,2,'nf_conntrack_icmpv4_error?[nf_conntrack]')
+f(50,1040,3,2,'nf_conntrack_find_get?[nf_conntrack]')
+f(50,1043,22,2,'nf_conntrack_inet_error?[nf_conntrack]')
+f(51,1044,14,2,'nf_conntrack_find_get?[nf_conntrack]')
+f(52,1044,12,2,'__nf_conntrack_find_get?[nf_conntrack]')
+f(52,1056,2,2,'hash_conntrack_raw?[nf_conntrack]')
+f(51,1058,1,2,'nf_ct_get_tuple?[nf_conntrack]')
+f(51,1059,6,2,'nf_ct_get_tuplepr?[nf_conntrack]')
+f(52,1061,1,2,'get_l4proto?[nf_conntrack]')
+f(52,1062,2,2,'nf_ct_get_tuple?[nf_conntrack]')
+f(52,1064,1,2,'nf_ct_get_tuple_ports.isra.31?[nf_conntrack]')
+f(50,1065,3,2,'nf_ct_get_tuplepr?[nf_conntrack]')
+f(50,1068,1,2,'nf_ct_invert_tuple?[nf_conntrack]')
+f(49,1069,1,2,'nf_conntrack_inet_error?[nf_conntrack]')
+f(47,1070,2,2,'netlbl_enabled')
+f(47,1072,2,2,'nf_conntrack_in?[nf_conntrack]')
+f(47,1074,2,2,'nf_nat_ipv4_fn?[nf_nat]')
+f(47,1076,21,2,'nf_nat_ipv4_local_fn?[nf_nat]')
+f(48,1079,18,2,'nf_nat_ipv4_fn?[nf_nat]')
+f(49,1081,16,2,'nf_nat_icmp_reply_translation?[nf_nat]')
+f(50,1084,13,2,'nf_ip_checksum')
+f(51,1085,1,2,'__skb_checksum')
+f(51,1086,11,2,'__skb_checksum_complete')
+f(52,1088,9,2,'__skb_checksum')
+f(53,1089,8,2,'csum_partial')
+f(54,1090,7,2,'do_csum')
+f(46,1097,4,2,'nf_nat_ipv4_local_fn?[nf_nat]')
+f(46,1101,6,2,'selinux_ipv4_output')
+f(45,1107,1,2,'ip_finish_output')
+f(45,1108,133,2,'ip_output')
+f(46,1114,1,2,'__x86_indirect_thunk_rax')
+f(46,1115,86,2,'ip_finish_output')
+f(47,1116,81,2,'__ip_finish_output')
+f(48,1120,1,2,'__local_bh_enable_ip')
+f(48,1121,74,2,'ip_finish_output2')
+f(49,1130,1,2,'__dev_queue_xmit')
+f(49,1131,2,2,'__local_bh_enable_ip')
+f(49,1133,62,2,'dev_queue_xmit')
+f(50,1134,56,2,'__dev_queue_xmit')
+f(51,1147,21,2,'dev_hard_start_xmit')
+f(52,1147,1,2,'__x86_indirect_thunk_rax')
+f(52,1148,14,2,'loopback_xmit')
+f(53,1153,2,2,'eth_type_trans')
+f(53,1155,4,2,'netif_rx')
+f(54,1155,4,2,'netif_rx_internal')
+f(55,1155,4,2,'enqueue_to_backlog')
+f(53,1159,1,2,'skb_clone_tx_timestamp')
+f(53,1160,2,2,'sock_wfree')
+f(52,1162,1,2,'netif_rx')
+f(52,1163,5,2,'sock_wfree')
+f(51,1168,8,2,'loopback_xmit')
+f(51,1176,2,2,'netdev_core_pick_tx')
+f(51,1178,12,2,'validate_xmit_skb')
+f(52,1179,11,2,'netif_skb_features')
+f(53,1189,1,2,'skb_network_protocol')
+f(50,1190,3,2,'dev_hard_start_xmit')
+f(50,1193,1,2,'netdev_core_pick_tx')
+f(50,1194,1,2,'validate_xmit_skb')
+f(48,1195,2,2,'ipv4_mtu')
+f(47,1197,1,2,'__x86_indirect_thunk_rdx')
+f(47,1198,1,2,'ip_finish_output2')
+f(47,1199,2,2,'ipv4_mtu')
+f(46,1201,1,2,'iptable_mangle_hook?[iptable_mangle]')
+f(46,1202,3,2,'ipv4_confirm?[nf_conntrack]')
+f(46,1205,33,2,'nf_hook_slow')
+f(47,1206,16,2,'iptable_mangle_hook?[iptable_mangle]')
+f(48,1207,15,2,'ipt_do_table?[ip_tables]')
+f(49,1221,1,2,'__local_bh_enable_ip')
+f(47,1222,3,2,'ipv4_confirm?[nf_conntrack]')
+f(48,1223,2,2,'nf_ct_deliver_cached_events?[nf_conntrack]')
+f(47,1225,3,2,'nf_nat_ipv4_fn?[nf_nat]')
+f(47,1228,3,2,'nf_nat_ipv4_out?[nf_nat]')
+f(48,1229,2,2,'nf_nat_ipv4_fn?[nf_nat]')
+f(49,1229,2,2,'nf_nat_icmp_reply_translation?[nf_nat]')
+f(47,1231,1,2,'selinux_ip_postroute')
+f(47,1232,6,2,'selinux_ipv4_postroute')
+f(48,1232,4,2,'selinux_ip_postroute')
+f(48,1236,2,2,'selinux_peerlbl_enabled')
+f(46,1238,3,2,'nf_nat_ipv4_out?[nf_nat]')
+f(44,1241,3,2,'ip_output')
+f(43,1244,5,2,'ipv4_mtu')
+f(42,1249,1,2,'ip_setup_cork')
+f(41,1250,112,2,'icmp_route_lookup.isra.23')
+f(42,1258,1,2,'__inet_dev_addr_type')
+f(42,1259,18,2,'__xfrm_decode_session')
+f(43,1270,3,2,'__x86_indirect_thunk_rax')
+f(43,1273,3,2,'security_xfrm_decode_session')
+f(44,1274,1,2,'selinux_xfrm_decode_session')
+f(45,1274,1,2,'selinux_xfrm_skb_sid_ingress')
+f(44,1275,1,2,'selinux_xfrm_skb_sid_ingress')
+f(43,1276,1,2,'selinux_xfrm_decode_session')
+f(42,1277,12,2,'inet_addr_type_dev_table')
+f(43,1278,10,2,'__inet_dev_addr_type')
+f(44,1281,3,2,'fib_get_table')
+f(44,1284,4,2,'fib_table_lookup')
+f(43,1288,1,2,'fib_get_table')
+f(42,1289,53,2,'ip_route_output_key_hash')
+f(43,1295,1,2,'__ip_dev_find')
+f(43,1296,46,2,'ip_route_output_key_hash_rcu')
+f(44,1304,6,2,'__ip_dev_find')
+f(45,1305,5,2,'inet_lookup_ifaddr_rcu')
+f(44,1310,5,2,'dev_get_by_index_rcu')
+f(44,1315,25,2,'fib_table_lookup')
+f(44,1340,2,2,'find_exception')
+f(42,1342,2,2,'ip_route_output_key_hash_rcu')
+f(42,1344,1,2,'make_kuid')
+f(43,1344,1,2,'map_id_range_down')
+f(42,1345,7,2,'security_skb_classify_flow')
+f(43,1349,1,2,'selinux_xfrm_decode_session')
+f(44,1349,1,2,'selinux_xfrm_skb_sid_ingress')
+f(43,1350,2,2,'selinux_xfrm_skb_sid_ingress')
+f(42,1352,5,2,'selinux_xfrm_decode_session')
+f(42,1357,5,2,'xfrm_lookup')
+f(43,1357,1,2,'dst_release')
+f(43,1358,4,2,'xfrm_lookup_with_ifid')
+f(44,1360,2,2,'dst_release')
+f(41,1362,1,2,'icmpv4_xrlim_allow.isra.24')
+f(41,1363,1,2,'inet_addr_type_dev_table')
+f(41,1364,2,2,'ip_append_data')
+f(41,1366,1,2,'ip_push_pending_frames')
+f(41,1367,2,2,'ipv4_mtu')
+f(41,1369,1,2,'make_kuid')
+f(41,1370,2,2,'security_skb_classify_flow')
+f(40,1372,10,2,'__udp4_lib_lookup')
+f(41,1378,4,2,'udp4_lib_lookup2')
+f(40,1382,1,2,'icmp_route_lookup.isra.23')
+f(40,1383,2,2,'icmpv4_xrlim_allow.isra.24')
+f(40,1385,3,2,'ipv4_mtu')
+f(40,1388,18,2,'kfree_skb')
+f(41,1388,4,2,'kfree_skbmem')
+f(42,1388,4,2,'kmem_cache_free')
+f(41,1392,1,2,'kmem_cache_free')
+f(41,1393,13,2,'skb_release_all')
+f(42,1393,9,2,'skb_release_data')
+f(43,1394,8,2,'skb_free_head')
+f(44,1394,8,2,'kfree')
+f(42,1402,4,2,'skb_release_head_state')
+f(43,1402,4,2,'dst_release')
+f(40,1406,1,2,'skb_release_all')
+f(39,1407,2,2,'kfree_skb')
+f(39,1409,1,2,'udp_lib_checksum_complete')
+f(37,1410,2,2,'raw_local_deliver')
+f(36,1412,1,2,'ip_protocol_deliver_rcu')
+f(36,1413,6,2,'iptable_filter_hook?[iptable_filter]')
+f(36,1419,3,2,'iptable_mangle_hook?[iptable_mangle]')
+f(36,1422,10,2,'iptable_security_hook?[iptable_security]')
+f(36,1432,4,2,'ipv4_confirm?[nf_conntrack]')
+f(36,1436,111,2,'nf_hook_slow')
+f(37,1443,1,2,'ipt_do_table?[ip_tables]')
+f(37,1444,41,2,'iptable_filter_hook?[iptable_filter]')
+f(38,1446,9,2,'conntrack_mt_v3?[xt_conntrack]')
+f(38,1455,30,2,'ipt_do_table?[ip_tables]')
+f(39,1482,3,2,'conntrack_mt_v3?[xt_conntrack]')
+f(40,1483,2,2,'conntrack_mt?[xt_conntrack]')
+f(37,1485,23,2,'iptable_mangle_hook?[iptable_mangle]')
+f(38,1485,23,2,'ipt_do_table?[ip_tables]')
+f(37,1508,25,2,'iptable_security_hook?[iptable_security]')
+f(38,1508,25,2,'ipt_do_table?[ip_tables]')
+f(37,1533,5,2,'ipv4_confirm?[nf_conntrack]')
+f(38,1533,4,2,'nf_confirm?[nf_conntrack]')
+f(39,1534,3,2,'nf_ct_deliver_cached_events?[nf_conntrack]')
+f(38,1537,1,2,'nf_ct_deliver_cached_events?[nf_conntrack]')
+f(37,1538,1,2,'nf_ct_deliver_cached_events?[nf_conntrack]')
+f(37,1539,8,2,'nf_nat_ipv4_fn?[nf_nat]')
+f(38,1541,1,2,'nf_ip_checksum')
+f(38,1542,1,2,'nf_nat_icmp_reply_translation?[nf_nat]')
+f(38,1543,4,2,'nf_nat_inet_fn?[nf_nat]')
+f(36,1547,4,2,'nf_nat_ipv4_fn?[nf_nat]')
+f(35,1551,3,2,'ip_local_deliver_finish')
+f(35,1554,3,2,'ip_rcv_finish_core.isra.17')
+f(34,1557,2,2,'ip_rcv_finish_core.isra.17')
+f(34,1559,3,2,'iptable_mangle_hook?[iptable_mangle]')
+f(34,1562,7,2,'iptable_raw_hook?[iptable_raw]')
+f(34,1569,4,2,'ipv4_conntrack_defrag?[nf_defrag_ipv4]')
+f(34,1573,3,2,'ipv4_conntrack_in?[nf_conntrack]')
+f(34,1576,267,2,'nf_hook_slow')
+f(35,1585,1,2,'ipt_do_table?[ip_tables]')
+f(35,1586,104,2,'iptable_mangle_hook?[iptable_mangle]')
+f(36,1589,1,2,'__local_bh_enable_ip')
+f(36,1590,100,2,'ipt_do_table?[ip_tables]')
+f(35,1690,122,2,'iptable_raw_hook?[iptable_raw]')
+f(36,1693,1,2,'__local_bh_enable_ip')
+f(36,1694,118,2,'ipt_do_table?[ip_tables]')
+f(37,1810,2,2,'__local_bh_enable_ip')
+f(35,1812,1,2,'ipv4_conntrack_defrag?[nf_defrag_ipv4]')
+f(35,1813,5,2,'ipv4_conntrack_in?[nf_conntrack]')
+f(36,1813,5,2,'nf_conntrack_in?[nf_conntrack]')
+f(35,1818,3,2,'nf_conntrack_in?[nf_conntrack]')
+f(35,1821,1,2,'nf_nat_ipv4_fn?[nf_nat]')
+f(35,1822,21,2,'nf_nat_ipv4_in?[nf_nat]')
+f(36,1826,1,2,'nf_nat_inet_fn?[nf_nat]')
+f(36,1827,16,2,'nf_nat_ipv4_fn?[nf_nat]')
+f(37,1831,9,2,'nf_nat_icmp_reply_translation?[nf_nat]')
+f(38,1838,2,2,'nf_ip_checksum')
+f(37,1840,1,2,'nf_nat_inet_fn?[nf_nat]')
+f(37,1841,2,2,'nf_nat_packet?[nf_nat]')
+f(34,1843,9,2,'nf_nat_ipv4_in?[nf_nat]')
+f(33,1852,1,2,'nf_hook_slow')
+f(29,1853,3,2,'process_backlog')
+f(28,1856,4,2,'net_rx_action')
+f(25,1860,69,2,'dev_queue_xmit')
+f(26,1861,62,2,'__dev_queue_xmit')
+f(27,1870,38,2,'dev_hard_start_xmit')
+f(28,1873,33,2,'loopback_xmit')
+f(29,1879,1,2,'eth_type_trans')
+f(29,1880,18,2,'netif_rx')
+f(30,1880,1,2,'enqueue_to_backlog')
+f(30,1881,17,2,'netif_rx_internal')
+f(31,1882,16,2,'enqueue_to_backlog')
+f(29,1898,2,2,'sock_def_write_space')
+f(29,1900,6,2,'sock_wfree')
+f(30,1903,3,2,'sock_def_write_space')
+f(28,1906,1,2,'netif_rx')
+f(28,1907,1,2,'sock_wfree')
+f(27,1908,3,2,'loopback_xmit')
+f(27,1911,2,2,'netdev_core_pick_tx')
+f(27,1913,2,2,'netif_skb_features')
+f(27,1915,7,2,'validate_xmit_skb')
+f(28,1916,5,2,'netif_skb_features')
+f(28,1921,1,2,'skb_network_protocol')
+f(27,1922,1,2,'validate_xmit_xfrm')
+f(26,1923,1,2,'dev_hard_start_xmit')
+f(26,1924,4,2,'netdev_core_pick_tx')
+f(26,1928,1,2,'validate_xmit_skb')
+f(24,1929,2,2,'ipv4_mtu')
+f(23,1931,1,2,'__x86_indirect_thunk_rdx')
+f(22,1932,1,2,'iptable_mangle_hook?[iptable_mangle]')
+f(22,1933,2,2,'ipv4_confirm?[nf_conntrack]')
+f(22,1935,29,2,'nf_hook_slow')
+f(23,1936,17,2,'iptable_mangle_hook?[iptable_mangle]')
+f(24,1938,15,2,'ipt_do_table?[ip_tables]')
+f(25,1950,3,2,'__local_bh_enable_ip')
+f(23,1953,2,2,'ipv4_confirm?[nf_conntrack]')
+f(24,1954,1,2,'nf_confirm?[nf_conntrack]')
+f(25,1954,1,2,'nf_ct_deliver_cached_events?[nf_conntrack]')
+f(23,1955,1,2,'nf_nat_ipv4_fn?[nf_nat]')
+f(23,1956,5,2,'nf_nat_ipv4_out?[nf_nat]')
+f(24,1958,3,2,'nf_nat_ipv4_fn?[nf_nat]')
+f(25,1958,3,2,'nf_nat_inet_fn?[nf_nat]')
+f(23,1961,3,2,'selinux_ipv4_postroute')
+f(24,1961,2,2,'selinux_ip_postroute')
+f(24,1963,1,2,'selinux_peerlbl_enabled')
+f(22,1964,1,2,'nf_nat_ipv4_out?[nf_nat]')
+f(22,1965,1,2,'selinux_ipv4_postroute')
+f(21,1966,1,2,'nf_hook_slow')
+f(20,1967,3,2,'ip_output')
+f(19,1970,3,2,'udp4_hwcsum')
+f(15,1973,14,2,'security_socket_sendmsg')
+f(16,1979,8,2,'selinux_socket_sendmsg')
+f(17,1979,2,2,'avc_has_perm')
+f(17,1981,6,2,'sock_has_perm')
+f(18,1984,3,2,'avc_has_perm')
+f(15,1987,7,2,'selinux_socket_sendmsg')
+f(14,1994,13,2,'sockfd_lookup_light')
+f(15,1995,8,2,'__fdget')
+f(16,1995,8,2,'__fget_light')
+f(17,1995,8,2,'__fget')
+f(15,2003,4,2,'__fget_light')
+f(13,2007,7,2,'import_single_range')
+f(12,2014,20,2,'syscall_slow_exit_work')
+f(13,2020,11,2,'__audit_syscall_exit')
+f(14,2023,2,2,'dput')
+f(14,2025,1,2,'mntput')
+f(14,2026,2,2,'path_put')
+f(14,2028,3,2,'unroll_tree_refs')
+f(13,2031,1,2,'path_put')
+f(13,2032,2,2,'unroll_tree_refs')
+f(12,2034,11,2,'syscall_trace_enter')
+f(13,2038,7,2,'__audit_syscall_entry')
+f(14,2042,3,2,'ktime_get_coarse_real_ts64')
+f(11,2045,2,2,'syscall_slow_exit_work')
+f(9,2047,3,4,'__pthread_disable_asynccancel')
+f(9,2050,2,4,'__pthread_enable_asynccancel')
+f(9,2052,2,4,'sockaddr_from_java')
+render();
+</script></body></html>
